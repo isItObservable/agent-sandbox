@@ -1,0 +1,269 @@
+# telemetry capture collector for agent-sandbox-demo
+#
+# One gateway Collector (Deployment) that harvests every signal the
+# agent-sandbox / gVisor stack actually produces and ships it to Dynatrace
+# your Dynatrace tenant over OTLP/HTTP.
+#
+# Signal sources wired here:
+#   1. prometheus       -> agent-sandbox controller :8080/metrics (agent_sandboxes, controller-runtime, workqueue)
+#   2. k8s_cluster      -> cluster-level object state (pods/nodes/deployments) incl. sandbox pods
+#   3. k8sobjects       -> WATCH on Sandbox/SandboxClaim/SandboxTemplate/SandboxWarmPool CRs + core Events
+#                          (this is the compensating control for the fact that the controller
+#                           emits ZERO Kubernetes Events for its own CRDs — see INVENTORY.md)
+#   4. kubeletstats     -> per-pod/container CPU+memory+network for gVisor-sandboxed pods
+#   5. otlp             -> traces/metrics/logs from workloads *inside* sandboxes (Python SDK path)
+#
+# Processor order obeys the hard rule: memory_limiter FIRST, batch LAST.
+# k8sattributes is present because this is Kubernetes; resourcedetection is
+# deliberately absent for the same reason.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-agentsandbox
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-agentsandbox
+rules:
+  # k8sattributes + k8s_cluster
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes, services, endpoints, replicationcontrollers, resourcequotas]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/stats, nodes/proxy, nodes/metrics]
+    verbs: [get, list]
+  - apiGroups: ["apps"]
+    resources: [replicasets, deployments, daemonsets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: ["autoscaling"]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: ["extensions"]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: ["events.k8s.io"]
+    resources: [events]
+    verbs: [get, list, watch]
+  - apiGroups: ["node.k8s.io"]
+    resources: [runtimeclasses]
+    verbs: [get, list, watch]
+  # the whole point: watch the agent-sandbox CRs.
+  # NOTE the group split — only `sandboxes` is in the core agents.x-k8s.io group;
+  # sandboxtemplates/sandboxclaims/sandboxwarmpools all live in the
+  # extensions.agents.x-k8s.io group (they ship with `--extensions`).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: [sandboxes]
+    verbs: [get, list, watch]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: [sandboxtemplates, sandboxclaims, sandboxwarmpools]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-agentsandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-agentsandbox
+subjects:
+  - kind: ServiceAccount
+    name: otel-agentsandbox
+    namespace: observability
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: agentsandbox
+  namespace: observability
+spec:
+  mode: deployment
+  replicas: 1
+  serviceAccount: otel-agentsandbox
+  env:
+    - name: K8S_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    - name: DT_API_URL
+      value: https://<your-tenant>.live.dynatrace.com/api
+    - name: DT_INGEST_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: dynatrace-otlp
+          key: dataIngestToken
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+  config:
+    receivers:
+      # ---- 1. agent-sandbox controller Prometheus endpoint --------------------
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: agent-sandbox-controller
+              scrape_interval: 30s
+              static_configs:
+                - targets: ["agent-sandbox-controller.agent-sandbox-system.svc.cluster.local:8080"]
+              metric_relabel_configs:
+                # CARDINALITY: the controller ships 100+ go_godebug_non_default_behavior_*
+                # families that are permanently 0 and carry zero operational value.
+                # Dropping them at the scrape removes ~60% of the series before
+                # they ever cost anything downstream.
+                - source_labels: [__name__]
+                  regex: "go_godebug_non_default_behavior_.*"
+                  action: drop
+                - source_labels: [__name__]
+                  regex: "go_(gc_heap_(allocs|frees)_by_size_bytes|sched_latencies_seconds|gc_pauses_seconds)_bucket"
+                  action: drop
+
+      # ---- 2. cluster object state -------------------------------------------
+      k8s_cluster:
+        auth_type: serviceAccount
+        collection_interval: 30s
+        node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
+        allocatable_types_to_report: [cpu, memory, ephemeral-storage, pods]
+
+      # ---- 3. Sandbox CR lifecycle + k8s Events as LOGS -----------------------
+      # The controller emits no Events for its CRDs, so a WATCH on the CRs
+      # themselves is the only way to get a lifecycle stream.
+      k8sobjects:
+        auth_type: serviceAccount
+        objects:
+          - name: sandboxes
+            group: agents.x-k8s.io
+            mode: watch
+          - name: sandboxtemplates
+            group: extensions.agents.x-k8s.io
+            mode: watch
+          - name: sandboxclaims
+            group: extensions.agents.x-k8s.io
+            mode: watch
+          - name: sandboxwarmpools
+            group: extensions.agents.x-k8s.io
+            mode: watch
+          - name: events
+            mode: watch
+            group: events.k8s.io
+
+      # ---- 4. anything the sandboxed agent itself emits ----------------------
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      # RULE: memory_limiter is ALWAYS the first processor.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 20
+
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.replicaset.name
+            - k8s.container.name
+          labels:
+            # agent-sandbox stamps this on every sandbox pod — it is the join key
+            # between a Pod and its owning Sandbox CR.
+            - tag_name: agentsandbox.sandbox.name_hash
+              key: agents.x-k8s.io/sandbox-name-hash
+              from: pod
+        pod_association:
+          - sources: [{from: resource_attribute, name: k8s.pod.uid}]
+          - sources: [{from: resource_attribute, name: k8s.pod.name}, {from: resource_attribute, name: k8s.namespace.name}]
+          - sources: [{from: connection}]
+
+      resource:
+        attributes:
+          - key: k8s.cluster.name
+            value: agent-sandbox-demo
+            action: upsert
+          - key: dt.security_context
+            value: agent-sandbox-demo
+            action: upsert
+
+      # Dynatrace OTLP metric ingest requires DELTA temporality; the Prometheus
+      # and kubeletstats receivers both emit CUMULATIVE.
+      cumulativetodelta: {}
+
+      # COST: a raw k8sobjects watch record for a Sandbox is ~6 KB, and ~70% of
+      # that is `managedFields` + the kubectl last-applied-configuration
+      # annotation — pure server-side bookkeeping with zero analytical value.
+      # Strip them, and lift the fields we actually query into flat attributes
+      # so the dashboard does not have to JSON-parse in DQL.
+      transform/sandbox_cr:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - set(body, ParseJSON(body)) where IsString(body) and IsMatch(body, "^\\{\"type\":")
+              - delete_key(body["object"]["metadata"], "managedFields")
+              - delete_key(body["object"]["metadata"]["annotations"], "kubectl.kubernetes.io/last-applied-configuration")
+              # flatten the fields the dashboard cares about
+              - set(attributes["agentsandbox.watch.type"], body["type"])
+              - set(attributes["agentsandbox.kind"], body["object"]["kind"])
+              - set(attributes["agentsandbox.name"], body["object"]["metadata"]["name"])
+              - set(attributes["agentsandbox.namespace"], body["object"]["metadata"]["namespace"])
+              - set(attributes["agentsandbox.launch_type"], body["object"]["metadata"]["labels"]["agents.x-k8s.io/launch-type"])
+              - set(attributes["agentsandbox.operating_mode"], body["object"]["spec"]["operatingMode"])
+              - set(attributes["agentsandbox.ready_reason"], body["object"]["status"]["conditions"][0]["reason"])
+              - set(attributes["agentsandbox.ready_status"], body["object"]["status"]["conditions"][0]["status"])
+
+      batch:
+        send_batch_size: 1000
+        send_batch_max_size: 1000
+        timeout: 10s
+
+    exporters:
+      otlphttp/dynatrace:
+        endpoint: "${env:DT_API_URL}/v2/otlp"
+        headers:
+          Authorization: "Api-Token ${env:DT_INGEST_TOKEN}"
+      debug:
+        verbosity: basic
+
+    service:
+      telemetry:
+        metrics:
+          level: detailed
+      pipelines:
+        metrics:
+          receivers: [prometheus, k8s_cluster, otlp]
+          processors: [memory_limiter, k8sattributes, resource, cumulativetodelta, batch]
+          exporters: [otlphttp/dynatrace]
+        logs:
+          receivers: [k8sobjects, otlp]
+          processors: [memory_limiter, k8sattributes, transform/sandbox_cr, resource, batch]
+          exporters: [otlphttp/dynatrace]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [otlphttp/dynatrace]

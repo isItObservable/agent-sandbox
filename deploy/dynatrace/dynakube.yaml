@@ -1,0 +1,53 @@
+# agent-sandbox-demo — Dynatrace k8s-monitoring (ActiveGate only)
+# ============================================================================
+# k8s-monitoring mode ONLY: an ActiveGate with the kubernetes-monitoring /
+# routing / dynatrace-api / metrics-ingest capabilities. There is NO OneAgent
+# and no codeModules — this is deliberately NOT full-stack. Cluster/K8s metrics
+# leave through this ActiveGate; all sandbox + controller telemetry leaves
+# through the OpenTelemetry Collector (deploy/collectors/). Two paths, both
+# auditable.
+#
+# PREREQ — create the token secret first (never commit real tokens):
+#   kubectl create namespace dynatrace
+#   kubectl create secret generic agent-sandbox-demo -n dynatrace \
+#     --from-literal=apiToken="${DT_OPERATOR_TOKEN}" \
+#     --from-literal=dataIngestToken="${DT_INGEST_TOKEN}"
+#   helm repo add dynatrace https://raw.githubusercontent.com/Dynatrace/dynatrace-operator/main/config/helm/repos/stable
+#   helm upgrade --install dynatrace-operator dynatrace/dynatrace-operator \
+#     -n dynatrace --version 1.9.0 --set installCRD=true --wait
+#
+# See deploy/dynatrace/dynatrace-secret.example.yaml for the token scopes.
+# ============================================================================
+apiVersion: dynatrace.com/v1beta6
+kind: DynaKube
+metadata:
+  name: agent-sandbox-demo
+  namespace: dynatrace
+  annotations:
+    feature.dynatrace.com/automatic-kubernetes-api-monitoring: "true"
+    feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: agent-sandbox-demo
+    feature.dynatrace.com/k8s-app-enabled: "true"
+    feature.dynatrace.com/label-version-detection: "true"
+spec:
+  apiUrl: https://<your-tenant>.live.dynatrace.com/api
+  # Token secret created above; same name as this CR.
+  tokens: agent-sandbox-demo
+  skipCertCheck: true
+  metadataEnrichment:
+    enabled: true
+  activeGate:
+    capabilities:
+      - kubernetes-monitoring
+      - routing
+      - dynatrace-api
+      - metrics-ingest
+    # PUBLIC ECR image pin (gotcha: the tenant-tagged AG image 404s;
+    # public.ecr.aws is the one that pulls).
+    image: public.ecr.aws/dynatrace/dynatrace-activegate:1.337.30.20260507-144959
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1536Mi

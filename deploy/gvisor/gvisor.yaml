@@ -1,0 +1,99 @@
+# agent-sandbox-demo — gVisor (runsc) RuntimeClass + node installer
+# ============================================================================
+# Installs the gVisor runsc runtime on every node and registers a `gvisor`
+# RuntimeClass. Sandboxes (agent-sandbox demo pods) set
+# `spec.runtimeClassName: gvisor` to run under the gVisor userspace kernel.
+#
+# The installer DaemonSet: downloads runsc + containerd-shim-runsc-v1 to
+# /usr/local/bin on the host, adds a `runsc` runtime to the host containerd
+# config, restarts containerd (via nsenter into host PID 1), then idles. It is
+# idempotent — re-running only re-applies the config drop-in.
+#
+# NOTE: nodes pull through Harbor and set containerd config_path=/etc/containerd/
+# certs.d. We APPEND the runsc runtime block to /etc/containerd/config.toml
+# WITHOUT touching the certs.d registry config, so Harbor mirrors keep working.
+# ============================================================================
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gvisor-installer
+  namespace: kube-system
+  labels:
+    app: gvisor-installer
+spec:
+  selector:
+    matchLabels:
+      app: gvisor-installer
+  template:
+    metadata:
+      labels:
+        app: gvisor-installer
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists          # run on control-plane + workers
+      containers:
+        - name: installer
+          image: debian:12-slim
+          securityContext:
+            privileged: true
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "[gvisor-installer] starting on $(hostname)"
+              # 1. Fetch runsc + shim to the host if not already present.
+              if ! chroot /host /usr/local/bin/runsc --version >/dev/null 2>&1; then
+                # debian:12-slim ships without curl — pull it in first.
+                if ! command -v curl >/dev/null 2>&1; then
+                  echo "[gvisor-installer] installing curl"
+                  apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+                fi
+                ARCH=$(uname -m)
+                URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+                echo "[gvisor-installer] downloading runsc from ${URL}"
+                for f in runsc containerd-shim-runsc-v1; do
+                  curl -fsSL "${URL}/${f}" -o "/host/usr/local/bin/${f}"
+                  chmod 0755 "/host/usr/local/bin/${f}"
+                done
+              else
+                echo "[gvisor-installer] runsc already installed: $(chroot /host /usr/local/bin/runsc --version | head -1)"
+              fi
+              # 2. Register the runsc runtime in containerd config (idempotent).
+              CFG=/host/etc/containerd/config.toml
+              if ! grep -q 'containerd.runtimes.runsc' "${CFG}"; then
+                echo "[gvisor-installer] appending runsc runtime to ${CFG}"
+                # NOTE: printf, not heredocs. A heredoc terminator must sit at
+                # column 0, which would end this YAML block scalar and break
+                # manifest parsing. printf keeps every line indented.
+                printf '%s\n' \
+                  '' \
+                  '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]' \
+                  '  runtime_type = "io.containerd.runsc.v1"' \
+                  '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]' \
+                  '  TypeUrl = "io.containerd.runsc.v1.options"' \
+                  '  ConfigPath = "/etc/containerd/runsc.toml"' \
+                  >> "${CFG}"
+                printf '%s\n' 'log_level = "info"' > /host/etc/containerd/runsc.toml
+                echo "[gvisor-installer] restarting containerd"
+                nsenter --target 1 --mount --uts --ipc --net --pid -- systemctl restart containerd
+              else
+                echo "[gvisor-installer] runsc runtime already present in containerd config"
+              fi
+              echo "[gvisor-installer] done; idling"
+              sleep infinity
+          volumeMounts:
+            - name: host
+              mountPath: /host
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+      terminationGracePeriodSeconds: 5

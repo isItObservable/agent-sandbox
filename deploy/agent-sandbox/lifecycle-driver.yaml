@@ -1,0 +1,113 @@
+# lifecycle driver: exercise every agent-sandbox code path so the
+# telemetry inventory is grounded in signal that ACTUALLY fired, not signal we
+# think exists.
+#
+# What this drives, and which telemetry it proves out:
+#
+#  | Object                    | Exercises                    | Telemetry it moves                                |
+#  |---------------------------|------------------------------|---------------------------------------------------|
+#  | SandboxTemplate demo-tpl  | template reconcile           | agent_sandboxes{sandbox_template=...}             |
+#  | SandboxWarmPool demo-pool | pre-warmed sandbox creation  | agent_sandboxes{launch_type="warm"}, workqueue_*  |
+#  | SandboxClaim claim-a/b    | claim -> bind from warm pool | agent_sandboxes{created_by,owned_by}, claim conds |
+#  | Sandbox burst-1..3        | cold-start path              | agent_sandboxes{launch_type="cold"}               |
+#  | Sandbox ttl-victim        | shutdownTime expiry          | agent_sandboxes{expired="true"}                   |
+#
+# The workload inside each sandbox burns a little CPU and writes to stdout on a
+# loop so kubeletstats and filelog have something real to report for a
+# gVisor-sandboxed pod (idle pods make for a useless dashboard).
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: demo-tpl
+  namespace: default
+  labels:
+    episode: isi1798
+spec:
+  envVarsInjectionPolicy: Allowed
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      containers:
+        - name: agent
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[warm-agent] $(hostname) up on $(uname -r)"
+              i=0
+              while true; do
+                i=$((i+1))
+                # a little real CPU so kubeletstats shows non-zero usage
+                awk 'BEGIN{s=0;for(n=0;n<200000;n++)s+=n%7;print "[warm-agent] tick",'"$i"',"checksum",s}'
+                sleep 15
+              done
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 300m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: demo-pool
+  namespace: default
+  labels:
+    episode: isi1798
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: demo-tpl
+---
+# Two claims against the warm pool — this is the path a real agent platform uses
+# (a user asks for a sandbox, the claim binds an already-warm one).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: claim-a
+  namespace: default
+  labels:
+    episode: isi1798
+spec:
+  warmPoolRef:
+    name: demo-pool
+  env:
+    - name: AGENT_SESSION
+      value: claim-a
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: claim-b
+  namespace: default
+  labels:
+    episode: isi1798
+spec:
+  warmPoolRef:
+    name: demo-pool
+  env:
+    - name: AGENT_SESSION
+      value: claim-b
+---
+# Cold-start sandbox with a TTL, to produce agent_sandboxes{expired="true"}.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: ttl-victim
+  namespace: default
+  labels:
+    episode: isi1798
+spec:
+  operatingMode: Running
+  shutdownPolicy: Delete
+  service: false
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      containers:
+        - name: agent
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args: ["echo '[ttl-victim] short-lived sandbox, will expire'; sleep infinity"]
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}

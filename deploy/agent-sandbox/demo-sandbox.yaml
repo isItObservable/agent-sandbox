@@ -1,0 +1,51 @@
+# agent-sandbox-demo — demo agent Sandbox running under gVisor
+# ============================================================================
+# Proves issue acceptance #4 end-to-end: an agent-sandbox `Sandbox` whose pod is
+# scheduled with `runtimeClassName: gvisor`, i.e. the agent workload executes
+# inside the gVisor userspace kernel rather than sharing the host kernel.
+#
+# API: agents.x-k8s.io/v1beta1 (agent-sandbox v0.5.2).
+# `service: true` makes the controller front the sandbox pod with a Service so a
+# router / client SDK can reach the agent.
+#
+# The demo agent image is intentionally a small, always-pullable stand-in. Swap
+# `image:` for the real openclaw / aider agent image once the episode repo
+# (isItObservable/agent-sandbox) publishes one — nothing else here changes.
+# ============================================================================
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: demo-agent
+  namespace: default
+  labels:
+    app: demo-agent
+    episode: isi1798
+spec:
+  operatingMode: Running
+  # Retain so the sandbox survives for telemetry capture.
+  shutdownPolicy: Retain
+  service: true
+  podTemplate:
+    spec:
+      # THE POINT OF THE DEMO: run the agent under the gVisor sandbox runtime.
+      runtimeClassName: gvisor
+      containers:
+        - name: agent
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[demo-agent] booted inside sandbox on $(hostname)"
+              # Prove to the log (and to anyone exec-ing in) that this really is
+              # the gVisor kernel, not the host kernel.
+              dmesg | head -3
+              uname -a
+              echo "[demo-agent] idling; ready for telemetry capture"
+              sleep infinity
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

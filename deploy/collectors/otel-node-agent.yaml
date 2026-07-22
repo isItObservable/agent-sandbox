@@ -1,0 +1,178 @@
+# node-level collector (DaemonSet) for agent-sandbox-demo
+#
+# Split out from the gateway because two receivers are inherently node-local:
+#   - kubeletstats : must talk to the kubelet on ITS OWN node. A Deployment-mode
+#                    collector cannot, because node NAMES do not resolve in
+#                    cluster DNS — you must use status.hostIP. This is the single
+#                    most common kubeletstats misconfiguration.
+#   - filelog      : reads /var/log/pods off the host filesystem, so it needs a
+#                    pod on every node.
+#
+# This is what gives us per-sandbox CPU/memory/network and the sandboxed agent's
+# own stdout — i.e. the resource-usage and security-relevant signal for gVisor pods.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-agentsandbox-node
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-agentsandbox-node
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/stats, nodes/proxy, nodes/metrics]
+    verbs: [get, list]
+  - apiGroups: ["apps"]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-agentsandbox-node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-agentsandbox-node
+subjects:
+  - kind: ServiceAccount
+    name: otel-agentsandbox-node
+    namespace: observability
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: agentsandbox-node
+  namespace: observability
+spec:
+  mode: daemonset
+  serviceAccount: otel-agentsandbox-node
+  hostNetwork: false
+  env:
+    - name: K8S_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    - name: K8S_NODE_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.hostIP
+    - name: DT_API_URL
+      value: https://<your-tenant>.live.dynatrace.com/api
+    - name: DT_INGEST_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: dynatrace-otlp
+          key: dataIngestToken
+  volumes:
+    - name: varlogpods
+      hostPath:
+        path: /var/log/pods
+    - name: varlibdockercontainers
+      hostPath:
+        path: /var/lib/docker/containers
+  volumeMounts:
+    - name: varlogpods
+      mountPath: /var/log/pods
+      readOnly: true
+    - name: varlibdockercontainers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  config:
+    receivers:
+      kubeletstats:
+        collection_interval: 30s
+        auth_type: serviceAccount
+        # node IP, NOT node name — see header comment.
+        endpoint: "https://${env:K8S_NODE_IP}:10250"
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+        extra_metadata_labels: [container.id]
+
+      filelog:
+        include: [/var/log/pods/*/*/*.log]
+        exclude:
+          # never tail ourselves — guaranteed feedback loop
+          - /var/log/pods/observability_*/*/*.log
+        include_file_path: true
+        include_file_name: false
+        start_at: end
+        operators:
+          - type: container
+            id: container-parser
+            add_metadata_from_filepath: true
+
+    processors:
+      # RULE: memory_limiter first.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 20
+
+      k8sattributes:
+        auth_type: serviceAccount
+        # only ever look at pods on THIS node — without this every DaemonSet
+        # replica builds a full cluster-wide pod cache.
+        filter:
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.container.name
+          labels:
+            - tag_name: agentsandbox.sandbox.name_hash
+              key: agents.x-k8s.io/sandbox-name-hash
+              from: pod
+        pod_association:
+          - sources: [{from: resource_attribute, name: k8s.pod.uid}]
+          - sources: [{from: resource_attribute, name: k8s.pod.name}, {from: resource_attribute, name: k8s.namespace.name}]
+          - sources: [{from: connection}]
+
+      resource:
+        attributes:
+          - key: k8s.cluster.name
+            value: agent-sandbox-demo
+            action: upsert
+          - key: dt.security_context
+            value: agent-sandbox-demo
+            action: upsert
+
+      cumulativetodelta: {}
+
+      batch:
+        send_batch_size: 1000
+        send_batch_max_size: 1000
+        timeout: 10s
+
+    exporters:
+      otlphttp/dynatrace:
+        endpoint: "${env:DT_API_URL}/v2/otlp"
+        headers:
+          Authorization: "Api-Token ${env:DT_INGEST_TOKEN}"
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [kubeletstats]
+          processors: [memory_limiter, k8sattributes, resource, cumulativetodelta, batch]
+          exporters: [otlphttp/dynatrace]
+        logs:
+          receivers: [filelog]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [otlphttp/dynatrace]

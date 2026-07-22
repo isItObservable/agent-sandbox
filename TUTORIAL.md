@@ -1,0 +1,598 @@
+# Tutorial — Kubernetes agent sandboxing, end to end
+
+This is the ordered, copy-paste walkthrough for the **Is It Observable** episode on
+`agent-sandbox`. By the end you will have AI-agent workloads running inside gVisor
+sandboxes on Kubernetes, a warm pool serving them, and an OpenTelemetry pipeline
+that tells you honestly what is going on — including the four things that will
+bite you.
+
+Every step is a stop in the video. `deploy/deploy.sh` does Steps 2–6 in one shot;
+this document explains *why* each one exists and what to look at afterwards.
+
+**Contents**
+
+- [Step 0 — Concepts: why a `Sandbox` and not a Deployment](#step-0--concepts-why-a-sandbox-and-not-a-deployment)
+- [Step 1 — Prerequisites and a cluster](#step-1--prerequisites-and-a-cluster)
+- [Step 2 — OpenTelemetry Operator](#step-2--opentelemetry-operator)
+- [Step 3 — gVisor: the kernel boundary](#step-3--gvisor-the-kernel-boundary)
+- [Step 4 — Dynatrace operator + DynaKube](#step-4--dynatrace-operator--dynakube)
+- [Step 5 — The `agent-sandbox` controller](#step-5--the-agent-sandbox-controller)
+- [Step 6 — Your first Sandbox, and proving the boundary](#step-6--your-first-sandbox-and-proving-the-boundary)
+- [Step 7 — Templates, warm pools and claims](#step-7--templates-warm-pools-and-claims)
+- [Step 8 — The OpenTelemetry Collectors](#step-8--the-opentelemetry-collectors)
+- [Step 9 — Read the telemetry: the four traps](#step-9--read-the-telemetry-the-four-traps)
+- [Step 10 — Lifecycle: suspend, resume, expire](#step-10--lifecycle-suspend-resume-expire)
+- [Step 11 — Operating guidance](#step-11--operating-guidance)
+- [Step 12 — Cleanup](#step-12--cleanup)
+
+---
+
+## Step 0 — Concepts: why a `Sandbox` and not a Deployment
+
+An AI agent session is a **singleton with a name**. It has a workspace it must
+keep, a stable address other things call, and a lifetime measured in hours. It is
+not fungible and it is not a numbered member of a set.
+
+Kubernetes has no primitive for that:
+
+| Primitive | Shape | Why it doesn't fit |
+|---|---|---|
+| Deployment | N interchangeable, stateless replicas | An agent's workspace is not interchangeable |
+| StatefulSet | ordered, numbered set with stable identity | You want *one*, named for the session, not `agent-0` |
+| bare Pod | a singleton | No controller, no lifecycle, no reconciliation |
+
+`agent-sandbox` (a Kubernetes-SIGs project, Apache-2.0) adds the missing one. It
+ships **four CRDs**:
+
+| CRD | API group | Role |
+|---|---|---|
+| `Sandbox` | `agents.x-k8s.io/v1beta1` | The core resource: one stateful pod + stable identity + lifecycle |
+| `SandboxTemplate` | `extensions.agents.x-k8s.io/v1beta1` | Reusable pod / volume / network-policy definition |
+| `SandboxWarmPool` | `extensions.agents.x-k8s.io/v1beta1` | N pre-warmed Sandboxes for instant allocation |
+| `SandboxClaim` | `extensions.agents.x-k8s.io/v1beta1` | A user-facing request that binds a session to a pooled Sandbox |
+
+> ⚠️ **Note the split API group.** Only `sandboxes` lives in `agents.x-k8s.io`.
+> The other three are in **`extensions.agents.x-k8s.io`**. This trips up RBAC and
+> collector config later — see [Step 8](#step-8--the-opentelemetry-collectors).
+
+The flow: a `SandboxTemplate` describes the agent. A `SandboxWarmPool` stamps out
+N of them and keeps them Ready. A user's `SandboxClaim` **adopts** one, so the
+session starts instantly instead of waiting for an image pull and a boot.
+
+And the second half of the story: the agent is going to execute code an LLM wrote.
+A normal container shares the host kernel with everything else on the node — one
+kernel bug away from the rest of your cluster. So we set
+`runtimeClassName: gvisor` and give it its own userspace kernel.
+
+```bash
+export KUBECONFIG=~/.kube/agent-sandbox-demo.kubeconfig
+export DT_API_URL=https://<your-tenant>.live.dynatrace.com/api
+export DT_OPERATOR_TOKEN=dt0c01....
+export DT_INGEST_TOKEN=dt0c01....
+```
+
+---
+
+## Step 1 — Prerequisites and a cluster
+
+**Tools:** `kubectl`, `helm` v3, and a `KUBECONFIG`.
+
+**The one hard requirement: you must control the nodes.** Step 3 installs `runsc`
+onto every node and edits the containerd config. That rules out managed offerings
+with immutable node images — unless they offer gVisor natively.
+
+| Where you're running | What to do |
+|---|---|
+| Bare metal / VMs / CAPI / kubeadm | Follow every step. This is what the episode uses. |
+| GKE | Use a **gVisor-enabled node pool** and **skip Step 3** entirely. |
+| kind / minikube | Works for Steps 2, 4–12, but gVisor needs `runsc` in the node image. Without it, drop `runtimeClassName` from the manifests and you lose the isolation story. |
+
+Any recent Kubernetes with a CNI and a default StorageClass is fine. This episode
+was built on a 1 control-plane + 2 worker cluster; nothing here needs more.
+
+---
+
+## Step 2 — OpenTelemetry Operator
+
+The Operator gives us the `OpenTelemetryCollector` CRD, which is how we deploy
+both Collectors in Step 8. Its admission webhook needs TLS certificates; rather
+than pull in cert-manager for one dependency, let the chart self-sign.
+
+```bash
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm repo update
+helm upgrade --install opentelemetry-operator open-telemetry/opentelemetry-operator \
+  -n opentelemetry-operator-system --create-namespace \
+  --version 0.156.0 \
+  --set "manager.image.repository=ghcr.io/open-telemetry/opentelemetry-operator/opentelemetry-operator" \
+  --set admissionWebhooks.certManager.enabled=false \
+  --set admissionWebhooks.autoGenerateCert.enabled=true \
+  --wait
+```
+
+> If you already run cert-manager, install it first and drop the two webhook
+> flags — that path is better for production.
+
+---
+
+## Step 3 — gVisor: the kernel boundary
+
+This is the step that makes the whole episode meaningful.
+
+gVisor (`runsc`) is a **userspace kernel**. It intercepts the syscalls your
+container makes and services them itself, in Go, in user space. The container
+never talks to the host kernel directly. When an agent runs LLM-generated code
+that tries something clever, the blast radius is a sandboxed process, not your
+node.
+
+```bash
+kubectl apply -f deploy/gvisor/gvisor.yaml
+kubectl -n kube-system rollout status ds/gvisor-installer
+```
+
+`deploy/gvisor/gvisor.yaml` contains two things:
+
+1. A **`RuntimeClass` named `gvisor`** with `handler: runsc`. This is the name
+   pods reference.
+2. A **privileged node-installer DaemonSet** that, on each node, downloads
+   `runsc` + `containerd-shim-runsc-v1`, appends the `io.containerd.runsc.v1`
+   runtime to the containerd config, and restarts containerd via `nsenter`.
+
+> **Two gotchas baked into that manifest, so you don't rediscover them:**
+>
+> - The installer script lives inside a YAML block scalar. A shell **heredoc**
+>   terminator must sit at column 0, which *ends the block scalar* and makes the
+>   whole manifest unparseable (`could not find expected ':'` — and `kubectl`
+>   reports the wrong line number). The manifest uses indented `printf` instead.
+> - `debian:12-slim` **has no `curl`**. The installer `apt-get install`s
+>   `curl ca-certificates` before it does anything else.
+
+Smoke-test the runtime before you build anything on it:
+
+```bash
+kubectl run gvisor-smoke --image=busybox --restart=Never \
+  --overrides='{"spec":{"runtimeClassName":"gvisor"}}' -- dmesg
+kubectl logs gvisor-smoke | head -1
+# [    0.000000] Starting gVisor...
+```
+
+That banner is the proof. If you don't see it, nothing downstream is isolated.
+
+---
+
+## Step 4 — Dynatrace operator + DynaKube
+
+We keep **two auditable paths** to the backend and no more: the ActiveGate
+carries Kubernetes cluster state, and the OTel Collectors (Step 8) carry
+everything about the sandboxes themselves. There is **no OneAgent** — the DynaKube
+is ActiveGate-only, deliberately not full-stack.
+
+```bash
+kubectl create namespace dynatrace --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic agent-sandbox-demo -n dynatrace \
+  --from-literal=apiToken="${DT_OPERATOR_TOKEN}" \
+  --from-literal=dataIngestToken="${DT_INGEST_TOKEN}"
+
+helm repo add dynatrace https://raw.githubusercontent.com/Dynatrace/dynatrace-operator/main/config/helm/repos/stable
+helm repo update
+helm upgrade --install dynatrace-operator dynatrace/dynatrace-operator \
+  -n dynatrace --version 1.9.0 --set installCRD=true --wait
+
+# set your tenant URL, then apply
+sed "s#https://<your-tenant>.live.dynatrace.com/api#${DT_API_URL}#" \
+  deploy/dynatrace/dynakube.yaml | kubectl apply -f -
+
+kubectl get dynakube -n dynatrace   # wait for Running
+```
+
+> **Gotcha, already fixed in `dynakube.yaml`:** the ActiveGate image is pinned to
+> the **public ECR** image (`public.ecr.aws/dynatrace/dynatrace-activegate:…`).
+> The tenant-tagged image 404s on pull; the public one works.
+
+Not using Dynatrace? Skip this step entirely and repoint the Collectors' exporter
+in Step 8. You lose ActiveGate cluster metrics; the gateway's `k8s_cluster`
+receiver covers most of it.
+
+---
+
+## Step 5 — The `agent-sandbox` controller
+
+One apply. No cert-manager needed — the release uses controller-managed webhook
+certificates.
+
+```bash
+export VERSION=v0.5.2
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
+kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller
+kubectl get crd | grep agents.x-k8s.io
+```
+
+You should see the four CRDs from Step 0. The release ships three assets — pick
+`sandbox-with-extensions.yaml` unless you specifically want the core `Sandbox`
+CRD without Template/WarmPool/Claim.
+
+The controller also serves a **conversion webhook** between `v1alpha1` and
+`v1beta1`. It shows up in the metrics later
+(`controller_runtime_webhook_requests_total{webhook="/convert"}`) and is worth a
+dashboard tile — a failing conversion webhook breaks every API call to the CRDs.
+
+---
+
+## Step 6 — Your first Sandbox, and proving the boundary
+
+```bash
+kubectl apply -f deploy/agent-sandbox/demo-sandbox.yaml
+kubectl get sandbox demo-agent -o wide
+```
+
+The manifest is deliberately small — the point is the two fields that matter:
+
+```yaml
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: demo-agent
+spec:
+  operatingMode: Running        # or Suspended — see Step 10
+  shutdownPolicy: Retain        # Retain | Delete | DeleteForeground
+  service: true                 # controller fronts the pod with a headless Service
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor  # ← THE POINT
+      containers:
+        - name: agent
+          image: busybox:1.36
+          # ...
+```
+
+The controller creates one Pod and one headless Service, and reports back on
+`status`: `serviceFQDN`, `service`, `podIPs`, `nodeName`, `conditions`.
+
+Now prove the isolation end to end — not on a raw pod this time, but through an
+actual `Sandbox`:
+
+```bash
+kubectl get pod demo-agent -o jsonpath='{.spec.runtimeClassName}'; echo
+# gvisor
+
+kubectl logs demo-agent -c agent
+# [demo-agent] booted inside sandbox on demo-agent
+# [    0.000000] Starting gVisor...
+# Linux demo-agent 4.19.0-gvisor #1 SMP ... x86_64 GNU/Linux
+```
+
+**`4.19.0-gvisor`** is the whole story in one string. That is not your node's
+kernel version — it is gVisor's synthetic guest kernel identifying itself. The
+agent is not on the host kernel.
+
+> **Access note:** with gVisor or Kata, direct `kubectl port-forward` to the
+> sandbox pod is **not supported**. Upstream ships a **Sandbox Router** — a
+> reverse proxy that routes on an `X-Sandbox-ID` header — and the Python SDK uses
+> it. If you expose sandboxes to users, the router becomes a production
+> dependency, so monitor it like one.
+
+---
+
+## Step 7 — Templates, warm pools and claims
+
+A single hand-written `Sandbox` is the demo. A platform uses the other three CRDs.
+
+```bash
+kubectl apply -f deploy/agent-sandbox/lifecycle-driver.yaml
+kubectl get sandbox,sandboxclaim,sandboxwarmpool -n default
+```
+
+That one file gives you the whole state space, on purpose — the telemetry in
+Step 9 is only interesting if every code path has actually fired:
+
+| Object | Exercises | What it moves in the telemetry |
+|---|---|---|
+| `SandboxTemplate demo-tpl` | template reconcile | `agent_sandboxes{sandbox_template=…}` |
+| `SandboxWarmPool demo-pool` (replicas: 2) | pre-warmed creation | `agent_sandboxes{launch_type="warm"}`, `workqueue_*` |
+| `SandboxClaim claim-a`, `claim-b` | claim → bind | `agent_sandboxes{created_by,owned_by}` |
+| `Sandbox ttl-victim` | `shutdownTime` expiry | `agent_sandboxes{expired="true"}` |
+
+The workload inside each sandbox burns a little CPU and writes to stdout on a
+loop, so `kubeletstats` and `filelog` have something real to report. Idle pods
+make for a useless dashboard.
+
+Watch a claim bind:
+
+```bash
+kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller | grep -i adopt
+# "Attempting sandbox adoption"
+# "Successfully adopted sandbox from warm pool"
+```
+
+That second line is a **warm-pool hit**. Hold onto it — Step 9 is about the case
+where you never see it.
+
+---
+
+## Step 8 — The OpenTelemetry Collectors
+
+Two Collectors, because one shape cannot do both jobs.
+
+```bash
+kubectl create namespace observability --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic dynatrace-otlp -n observability \
+  --from-literal=dataIngestToken="${DT_INGEST_TOKEN}"
+
+for f in deploy/collectors/otel-gateway.yaml deploy/collectors/otel-node-agent.yaml; do
+  sed "s#https://<your-tenant>.live.dynatrace.com/api#${DT_API_URL}#" "$f" | kubectl apply -f -
+done
+kubectl get pods -n observability
+```
+
+**Gateway (`agentsandbox`, Deployment ×1)** — cluster-scoped sources:
+
+| Receiver | Signal | What it gets |
+|---|---|---|
+| `prometheus` | metrics | the controller's `:8080/metrics` — `agent_sandboxes`, controller-runtime, workqueue |
+| `k8s_cluster` | metrics | cluster object state |
+| `k8sobjects` | logs | **watch** on all four CRDs — the workaround for the missing Events |
+| `otlp` | all | `:4317` / `:4318`, for workloads *inside* sandboxes |
+
+**Node agent (`agentsandbox-node`, DaemonSet)** — node-local sources:
+
+| Receiver | Signal | What it gets |
+|---|---|---|
+| `kubeletstats` | metrics | per-pod/container CPU, memory, network for sandboxed pods |
+| `filelog` | logs | `/var/log/pods` — the only window into the agent inside the sandbox |
+
+Processor order in every pipeline is `memory_limiter` → `k8sattributes` →
+`[transform]` → `resource` → `[cumulativetodelta]` → `batch`. Memory limiter
+first, batch last, always. `k8sattributes` is in because this is Kubernetes;
+`resourcedetection` is deliberately out for the same reason.
+
+### Three configuration traps, already fixed in these manifests
+
+1. **`kubeletstats` cannot run in a Deployment.** `endpoint:
+   https://${K8S_NODE_NAME}:10250` fails with `no such host` — node *names* do
+   not resolve in cluster DNS. It must be a DaemonSet using `status.hostIP`.
+   This is the single most common kubeletstats misconfiguration.
+2. **The CRD group is split** (Step 0). Grant RBAC on `sandboxes` in
+   `agents.x-k8s.io` **and** on `sandboxtemplates` / `sandboxclaims` /
+   `sandboxwarmpools` in `extensions.agents.x-k8s.io`. Get it wrong and you get a
+   silent `forbidden` on the watch: the Collector stays `Running` and simply
+   never emits those records. No crash, no obvious error.
+3. **`k8s_cluster` needs `autoscaling` RBAC** even with zero HPAs in the cluster,
+   or it log-spams `failed to list *v2.HorizontalPodAutoscaler` forever.
+
+### Two cost decisions worth copying
+
+- The controller ships ~48 `go_godebug_non_default_behavior_*` families that are
+  permanently `0`, plus some very wide Go histograms. `metric_relabel_configs`
+  drops them **at the scrape** — about **60% of the series gone** for zero
+  operational loss, and it costs nothing downstream because it never leaves the
+  receiver.
+- A raw `k8sobjects` watch record for one Sandbox is ~3.9 KB, ~70% of which is
+  `managedFields` and the `last-applied-configuration` annotation. The
+  `transform/sandbox_cr` processor deletes both and lifts the useful fields into
+  flat attributes: **3907 → 1084 bytes, a 72% reduction**, and your queries never
+  have to JSON-parse. The attributes it produces:
+
+  ```
+  agentsandbox.watch.type      ADDED | MODIFIED | DELETED
+  agentsandbox.kind            Sandbox | SandboxClaim | …
+  agentsandbox.name / .namespace
+  agentsandbox.launch_type     cold | warm
+  agentsandbox.operating_mode  Running | Suspended
+  agentsandbox.ready_reason    DependenciesReady | SandboxSuspended | PodTerminated
+  agentsandbox.ready_status    True | False
+  ```
+
+Confirm data is actually leaving:
+
+```bash
+kubectl -n observability logs deploy/agentsandbox-collector | grep -i "send_failed\|Exporting failed"
+# (silence is the correct output)
+```
+
+---
+
+## Step 9 — Read the telemetry: the four traps
+
+Full inventory in [`OBSERVABILITY.md`](./OBSERVABILITY.md). Here are the four
+findings that only show up when you actually run this.
+
+### 9a. The warm-pool trap ⭐
+
+**Setting `spec.env` on a `SandboxClaim` silently defeats the warm pool.**
+
+Two claims, same healthy 2-replica pool:
+
+| Claim | `spec.env`? | Controller log | `launch_type` | Time-to-ready |
+|---|---|---|---|---|
+| `claim-warm` | **yes** | `"creating sandbox from template"` | `cold` | **+6 s** |
+| `claim-noenv` | **no** | `"Successfully adopted sandbox from warm pool"` | `warm` | **−136 s** |
+
+A **negative** time-to-ready is the cleanest possible proof of a pool hit: the
+sandbox was Ready more than two minutes before the claim that got it existed.
+
+The mechanism is in the labels. The pool stamps
+`agents.x-k8s.io/sandbox-pod-template-hash` on its members. Injecting env vars
+changes the effective pod template, no pooled member matches the hash, and the
+claim controller falls through to a cold create. The pool sits at
+`readyReplicas: 2`, untouched, the whole time.
+
+**Nothing errors. Nothing warns.** You get a 0% hit rate at full pool cost, and
+personalising a session with env vars is the *normal* thing to do. Reproduce it:
+
+```bash
+kubectl get sandbox -o custom-columns=\
+NAME:.metadata.name,LAUNCH:.metadata.labels.agents\\.x-k8s\\.io/launch-type
+```
+
+The dashboard tile:
+
+```dql
+timeseries sb = avg(agent_sandboxes), by:{launch_type}, filter: owned_by == "SandboxClaim"
+```
+
+rendered as `warm / (warm + cold)`. Pinned at cold = your pool is decorative.
+
+**Fix:** don't personalise through `spec.env`. Pass session config through a
+mounted Secret/ConfigMap the template already references, or through the agent's
+own API after adoption. If you must use env, size the pool to zero and accept
+cold starts — at least you stop paying for pods nobody adopts.
+
+### 9b. The `/proc` lie
+
+From inside a gVisor sandbox with a **256 Mi** limit:
+
+```bash
+kubectl exec demo-agent -c agent -- head -2 /proc/meminfo
+# MemTotal:       12248276 kB     ← the HOST's 12 GiB, not the pod's 256 Mi
+```
+
+Every "how much memory do I have" code path is wrong inside a sandbox: Python's
+`psutil`, Node's `os.totalmem()`, JVM ergonomics. A runtime that sizes its heap
+from `MemTotal` will size for 12 GiB inside a 256 Mi container and get OOM-killed
+with no useful diagnostic.
+
+**Take sandbox resource telemetry from `kubeletstats` — from outside — never from
+the agent's self-report from inside.** This is the single best "observability is
+different in a sandbox" moment in the episode.
+
+### 9c. The error metric that lies
+
+```
+"Failed to update sandbox status" … "the object has been modified"
+```
+
+This fires on nearly every sandbox creation. It is a benign optimistic-concurrency
+race that self-heals on requeue — **but it is logged at `level: error` with a full
+stack trace and it increments
+`controller_runtime_reconcile_errors_total{controller="sandbox"}`.**
+
+⚠️ **Do not alert on that counter.** It has a permanent non-zero floor. Alert on
+**`workqueue_depth`** instead — that is the real "is the controller keeping up"
+signal, and it sat at `0` for all four controllers throughout our run.
+
+### 9d. No Kubernetes Events for the CRDs
+
+Enumerate every Event in the cluster and you find Pod: 363, DaemonSet: 22,
+Node: 16, … and **Sandbox / SandboxClaim / SandboxTemplate / SandboxWarmPool: 0**.
+
+The controller emits none. So `kubectl describe sandbox` has no history, and any
+Event-based alerting — including your platform's built-in Kubernetes events — is
+blind to sandbox lifecycle. You see only the *derived* Pod events.
+
+The `k8sobjects` watch from Step 8 is the compensating control: every CR
+transition becomes a log record. Today it is the only way to get a sandbox
+lifecycle stream.
+
+> *Good first upstream contribution: emitting Events on
+> create / adopt / suspend / expire would be a small, high-value PR.*
+
+### And what simply isn't there
+
+- **No traces.** The controller has no OTel SDK. Spans exist only if the workload
+  *inside* a sandbox makes them — the gateway's OTLP endpoint
+  (`agentsandbox-collector.observability.svc:4317`) is live and waiting.
+- **No gVisor metrics.** `runsc` ships a `metric-server` (sentry syscall counts,
+  memory, network); the standard install does not enable it.
+- **No runtime attribution in the metric pipeline.** Neither `kubeletstats` nor
+  `k8sattributes` surfaces `runtimeClassName`, so **from metrics alone you cannot
+  tell a sandboxed pod from a normal one**. Join via the CR watch stream, or
+  stamp a pod label in the `SandboxTemplate` and extract it with `k8sattributes`.
+
+---
+
+## Step 10 — Lifecycle: suspend, resume, expire
+
+Hibernation is the cost lever. Flip `operatingMode`:
+
+```bash
+kubectl patch sandbox demo-agent --type=merge \
+  -p '{"spec":{"operatingMode":"Suspended"}}'
+kubectl get sandbox demo-agent -o jsonpath='{.status.conditions}' | jq
+```
+
+Observed transitions:
+
+| Trigger | `Ready` | `Suspended` | reason |
+|---|---|---|---|
+| create → pod running | `True` | — | `DependenciesReady` |
+| `operatingMode: Suspended` | `False` | `True` | `SandboxSuspended` / `PodTerminated` |
+| back to `Running` | `True` | — | `DependenciesReady` |
+
+> ⚠️ **Suspend is not checkpoint/restore.** It **deletes the pod outright**
+> (`kubectl get pod` → NotFound) and recreates it on resume. Measured resume:
+> **~20 s — a full cold start.** Any "suspend idle agent sessions to save money"
+> strategy must budget that on wake, and any in-memory state in the agent is
+> gone. Persist to the `volumeClaimTemplates` PVC, which does survive.
+
+TTL is the other lever — `shutdownTime` (RFC3339) with `shutdownPolicy`
+(`Retain` / `Delete` / `DeleteForeground`). The `ttl-victim` sandbox in the
+lifecycle driver exists to produce `agent_sandboxes{expired="true"}`, which is
+your **reclamation-leak** alert: expired but still alive means something isn't
+collecting the garbage.
+
+---
+
+## Step 11 — Operating guidance
+
+**Isolation.** Always pair sandboxes that run untrusted code with
+`runtimeClassName: gvisor` (or Kata). A plain `runc` Sandbox shares the host
+kernel and gives you nothing beyond a nicer API. Read the upstream
+[threat model](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/security/threat_model.md):
+it documents a **reserved-label spoofing** risk where a tenant setting
+`agents.x-k8s.io/sandbox-name-hash` in their own pod template could pull another
+tenant's traffic. The controller filters those keys and re-asserts the hash — so
+**keep the controller patched and don't downgrade**. Your isolation depends on
+that filtering.
+
+**Network.** Default to `networkPolicyManagement: Managed` with default-deny plus
+an explicit egress allow-list. The upstream aider example allows DNS and `:443`
+only. This is what stops a rogue agent exfiltrating your data.
+
+**Cost.** Set requests/limits on every `podTemplate` container. Use
+`shutdownTime` + `shutdownPolicy: Delete` for reclamation. Size `SandboxWarmPool`
+`replicas` as a deliberate latency-versus-idle-cost trade — and then **verify the
+pool is actually being hit** (§9a), because a pool with a 0% hit rate is pure
+cost.
+
+**What to alert on:**
+
+| Alert on | Not on |
+|---|---|
+| `workqueue_depth` sustained > 0 | `controller_runtime_reconcile_errors_total` (§9c) |
+| `agent_sandboxes{ready_condition="false"}` sustained | raw restart counts of sandbox pods |
+| `agent_sandboxes{expired="true"}` (reclamation leak) | — |
+| warm-pool hit rate dropping (§9a) | — |
+| `controller_runtime_webhook_requests_total{code!="200"}` | — |
+
+**Upgrades.** Use version-pinned release manifests. Two API versions are served
+(`v1alpha1`, `v1beta1`) with a conversion webhook between them — test conversion
+before bumping, and watch that webhook's metrics during the rollout.
+
+**Semantic conventions.** `gen_ai.*` versus OpenInference **does not apply here**.
+`agent-sandbox` is infrastructure: it has no notion of models, tokens or prompts,
+emits no GenAI telemetry, and defines no convention of its own. That question
+matters exactly one layer up, if the workload *inside* the sandbox is an LLM
+agent. When it is: prefer **`gen_ai.*`** (OTel semconv), and stamp platform
+attributes on those spans —
+`agentsandbox.sandbox.name`, `agentsandbox.launch_type`, `agentsandbox.template` —
+so the agent's traces can be joined back to the sandbox that ran them.
+
+---
+
+## Step 12 — Cleanup
+
+```bash
+kubectl delete -f deploy/agent-sandbox/lifecycle-driver.yaml --ignore-not-found
+kubectl delete -f deploy/agent-sandbox/demo-sandbox.yaml --ignore-not-found
+kubectl delete -f deploy/collectors/ --ignore-not-found
+kubectl delete -f deploy/dynatrace/dynakube.yaml --ignore-not-found
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox-with-extensions.yaml
+kubectl delete -f deploy/gvisor/gvisor.yaml --ignore-not-found
+helm uninstall dynatrace-operator -n dynatrace
+helm uninstall opentelemetry-operator -n opentelemetry-operator-system
+```
+
+Deleting `gvisor.yaml` removes the RuntimeClass and the installer DaemonSet, but
+does **not** uninstall `runsc` from the nodes or revert the containerd config.
+On a disposable cluster, delete the cluster.
