@@ -477,6 +477,34 @@ tools is a chatbot. The same call reports a 262144-token context; the config
 below asks for 131072, because the KV cache for the full window on a 122B model
 is itself larger than anything in this cluster.
 
+### What it actually costs, measured
+
+Worth knowing before you rely on it, because one of these numbers is a trap:
+
+| | |
+|---|---|
+| generation, warm | **~48 tok/s** at `num_ctx: 131072` |
+| time to first token, warm | **0.47 s** from inside a pooled sandbox |
+| time to first token, **cold** | **25–29 s** |
+
+The warm numbers are measured through the whole path — Service, EndpointSlice,
+NetworkPolicy, LAN — and are indistinguishable from hitting the daemon directly,
+so none of the plumbing in this section costs you anything.
+
+The cold number is the one to plan around. `keep_alive` decides how long Ollama
+holds the weights after the last request; the config below asks for 15 minutes.
+Idle past that and the next request pays a full reload — and because that reload
+happens *inside* the agent's first model call, what you see is an agent that
+sits there for half a minute, which looks exactly like the egress trap above.
+Two different faults, one symptom. Check `curl -s $OLLAMA_HOST:11434/api/ps`
+before blaming the network: if the model is not listed, it is a reload, not a
+policy.
+
+Raising `num_ctx` to the full 262144 did not change the memory split on the host
+we measured (84.6 GB total, 3.7 GB of it on CPU either way) and did not slow
+generation down, so the 131072 in the config is a conservative choice rather
+than a necessary one.
+
 If you want the model in-cluster instead, `qwen3:8b` is 5.2 GB and fits — every
 trap below still applies, because they are about DNS and egress, not model size.
 
