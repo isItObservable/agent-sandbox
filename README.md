@@ -93,7 +93,7 @@ There is no OneAgent — this is deliberately not full-stack.
 | `deploy/deploy.sh` | One-shot installer for the whole stack. |
 | `deploy/gvisor/` | `runsc` RuntimeClass + privileged node-installer DaemonSet. |
 | `deploy/dynatrace/` | ActiveGate-only DynaKube + token secret template. |
-| `deploy/agent-sandbox/` | The demo Sandbox, plus a lifecycle driver (Template + WarmPool + Claims + a TTL sandbox). |
+| `deploy/agent-sandbox/` | The demo OpenClaw Sandbox + its config/secret template, plus a lifecycle driver (Template + WarmPool + Claims + a TTL sandbox). |
 | `deploy/collectors/` | The two OTel Collectors: gateway Deployment + node DaemonSet. |
 | `deploy/dashboards/` | Dynatrace dashboard for the sandbox fleet. |
 
@@ -182,7 +182,20 @@ possible proof of a warm-pool hit — in [`OBSERVABILITY.md`](./OBSERVABILITY.md
 - **From metrics alone you cannot tell a sandboxed pod from a normal one.**
   Neither `kubeletstats` nor `k8sattributes` surfaces `runtimeClassName`.
 - **Suspend is not checkpoint/restore.** It deletes the pod. Resume is a full
-  cold start (~20 s measured). Budget for it.
+  cold start (**22 s** measured to a serving OpenClaw gateway, on a node that
+  already has the image). Budget for it.
+- **The `Suspended` condition is never cleared on resume.** A resumed sandbox
+  reports `Ready=True` *and* `Suspended=True` at the same time, indefinitely.
+  Do not alert on `Suspended`.
+- **`Ready` means the pod is ready, not that the agent is.** Without a readiness
+  probe, `demo-agent` reported Ready 14 s before OpenClaw could serve a request —
+  and a `SandboxWarmPool` counts the same condition. Probe your agent images.
+- **You cannot have both a warm pool and a per-session PVC** on v0.5.2. A PVC in
+  the template is shared by every pooled member; a per-claim `volumeClaimTemplates`
+  bypasses the pool. Pooled agents get ephemeral state.
+- **Under gVisor, `/proc` is only as honest as your limits.** With a memory limit
+  set, `MemTotal` is exactly the limit. Without one, it is the whole node — and
+  runtimes size their heaps from it.
 
 ---
 
@@ -191,6 +204,7 @@ possible proof of a warm-pool hit — in [`OBSERVABILITY.md`](./OBSERVABILITY.md
 ```bash
 kubectl delete -f deploy/agent-sandbox/lifecycle-driver.yaml --ignore-not-found
 kubectl delete -f deploy/agent-sandbox/demo-sandbox.yaml --ignore-not-found
+kubectl delete secret openclaw-secrets -n default --ignore-not-found
 kubectl delete -f deploy/collectors/ --ignore-not-found
 kubectl delete -f deploy/dynatrace/dynakube.yaml --ignore-not-found
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox-with-extensions.yaml

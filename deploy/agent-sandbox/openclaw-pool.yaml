@@ -1,0 +1,119 @@
+# Warm-pooling a REAL agent image — the Step 7 / §9a demonstration
+# ============================================================================
+# The lifecycle driver uses a tiny image so the state space is quick to
+# exercise. This file does the same thing with the actual OpenClaw agent, and
+# is what proves the episode's central claim: a warm pool still adopts when the
+# agent needs config and credentials.
+#
+# THE RULE: everything the agent needs to be born configured lives HERE, in the
+# SandboxTemplate. The claims below are deliberately empty. Move any of it into
+# a claim's `spec.env` or `spec.volumeClaimTemplates` and the controller logs
+# "Bypassing warm pool adoption..." and cold-starts instead — see TUTORIAL.md §9a.
+#
+# Requires the `openclaw-secrets` Secret and `openclaw-config` ConfigMap from
+# demo-sandbox.yaml, so apply that first.
+# ============================================================================
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: openclaw-tpl
+  namespace: default
+spec:
+  envVarsInjectionPolicy: Allowed
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      containers:
+        - name: agent
+          image: ghcr.io/openclaw/openclaw:slim
+          ports:
+            - name: gateway
+              containerPort: 18789
+          env:
+            - name: HOME
+              value: /workspace
+            - name: OPENCLAW_CONFIG_PATH
+              value: /etc/openclaw/openclaw.json
+            - name: OPENCLAW_STATE_DIR
+              value: /workspace/state
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: OPENCLAW_GATEWAY_TOKEN
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: ANTHROPIC_API_KEY
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openclaw
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+          # Without this, pool members report Ready ~14s before the gateway can
+          # serve — so a claim can adopt a member that refuses its first request.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 18789
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            # Under gVisor the limit is what makes /proc honest. See §9b.
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: openclaw-config
+        # emptyDir, not a PVC: a PVC named here would be shared by every pooled
+        # member, and a per-claim volumeClaimTemplate bypasses the pool. Pooled
+        # agents get ephemeral state — see the trade-off note in TUTORIAL.md §7.
+        - name: workspace
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: openclaw-pool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: openclaw-tpl
+---
+# THE GOOD CLAIM — nothing but a pool reference. Adopts a warm member.
+# Measured: time-to-ready −86 s (Ready before the claim existed).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: oc-claim-warm
+  namespace: default
+spec:
+  warmPoolRef:
+    name: openclaw-pool
+---
+# THE TRAP — one env var, and the pool is bypassed entirely.
+# Measured: time-to-ready +6 s (cold create from the template).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: oc-claim-env
+  namespace: default
+spec:
+  warmPoolRef:
+    name: openclaw-pool
+  env:
+    - name: OPENCLAW_SESSION_ID
+      value: "user-42"
