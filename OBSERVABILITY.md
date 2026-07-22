@@ -87,8 +87,21 @@ controller falls through to a cold create.
 **Why it matters:** a warm pool exists purely to remove cold-start latency for agent
 sessions. A platform that personalises each session with env vars — which is the *normal*
 thing to do — gets **0% warm-pool hit rate** while the pool still costs full price in
-running pods. Nothing errors. Nothing warns. The only symptom is
-`agent_sandboxes{launch_type="cold", owned_by="SandboxClaim"}` staying pinned at 100%.
+running pods. Nothing errors, nothing warns, and no Kubernetes Event records it (§3). The
+metric symptom is `agent_sandboxes{launch_type="cold", owned_by="SandboxClaim"}` staying
+pinned at 100%.
+
+The controller *does* state the reason — but at `level: info`, in a single line among
+thousands, with no metric counting it:
+
+```
+Bypassing warm pool adoption because custom configuration is provided
+(env or volume claim templates)
+```
+
+Note the parenthetical: **per-claim `volumeClaimTemplates` bypass the pool the same way
+`spec.env` does.** That string is the highest-signal thing in the controller's log — it
+names the exact claim that bypassed the pool, so it deserves a saved query and an alert.
 
 **→ Dashboard requirement:** a *warm-pool hit rate* tile is the single
 highest-value visualisation in this episode:

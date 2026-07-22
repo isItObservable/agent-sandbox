@@ -1,0 +1,501 @@
+{
+  "name": "agent-sandbox — Fleet, Warm Pool & Isolation",
+  "type": "dashboard",
+  "isPrivate": true,
+  "content": {
+    "layouts": {
+      "0": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "1": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "10": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "11": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 30
+      },
+      "12": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 30
+      },
+      "13": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "14": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 36
+      },
+      "15": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 36
+      },
+      "16": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 36
+      },
+      "17": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "18": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
+      "19": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 46
+      },
+      "2": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "20": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "21": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "3": {
+        "h": 6,
+        "w": 9,
+        "x": 6,
+        "y": 7
+      },
+      "4": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 7
+      },
+      "5": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "6": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "7": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "8": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 21
+      },
+      "9": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 21
+      }
+    },
+    "tiles": {
+      "0": {
+        "content": "# agent-sandbox — Fleet, Warm Pool & Isolation\n\nKubernetes **agent-sandbox** v0.5.2 (`git_commit 9575043`) on cluster `agent-sandbox-demo`, sandboxes running under **gVisor** (`runsc`).\n\nagent-sandbox is the **mirror image of kagent**: it emits **Prometheus metrics + object-watch logs + pod logs, and no traces at all**. Every tile here is metric- or log-derived, never span-derived. Sources: controller `:8080/metrics`, `k8sobjects` CR watch, `kubeletstats`, `filelog`.\n\nAll controller-runtime metrics are scoped with `k8s.cluster.name == \"agent-sandbox-demo\"` — the same tenant also ingests a CAPI management cluster that publishes identically-named `workqueue_*` and `controller_runtime_*` series.",
+        "type": "markdown"
+      },
+      "1": {
+        "content": "## ⭐ Warm-pool efficiency — the headline\n\nA `SandboxWarmPool` exists purely to remove cold-start latency. **Setting `spec.env` (or volume claim templates) on a `SandboxClaim` silently defeats it** — the env changes the effective pod template hash, no pooled sandbox matches, and the claim falls through to a cold create while the pool keeps costing full price.",
+        "type": "markdown"
+      },
+      "10": {
+        "content": "## Controller health\n\n⚠️ **`controller_runtime_reconcile_errors_total{controller=\"sandbox\"}` is deliberately not charted as a health signal.** It has a permanent non-zero floor from a benign optimistic-concurrency race (`\"the object has been modified\"`) that self-heals on requeue. Charting it makes a healthy cluster look broken and alerting on it pages forever. **Use `workqueue_depth` for saturation instead** — it is the honest \"is the controller keeping up\" signal. The error stream is still shown below, as a triage surface rather than an alert source.",
+        "type": "markdown"
+      },
+      "11": {
+        "description": "Backlog per agent-sandbox controller. Sustained depth > 0 means reconciliation is falling behind. This, not reconcile_errors_total, is what to alert on.",
+        "query": "timeseries d = avg(workqueue_depth, default:0), by:{name}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and in(name, {\"sandbox\", \"sandboxclaim\", \"sandboxtemplate\", \"sandboxwarmpool\"})",
+        "querySettings": {},
+        "title": "Workqueue depth (saturation) — the honest health signal",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "12": {
+        "description": "95th percentile of per-interval average reconcile duration (rollup:avg — the Prometheus histogram is ingested as _bucket only, so this is a percentile of averages, not a true bucket quantile).",
+        "query": "timeseries p95 = percentile(controller_runtime_reconcile_time_seconds, 95, rollup: avg), by:{controller}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and in(controller, {\"sandbox\", \"sandboxclaim\", \"sandboxtemplate\", \"sandboxwarmpool\"})",
+        "querySettings": {},
+        "title": "Reconcile duration p95 by controller",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "13": {
+        "description": "How long work sits queued before a worker picks it up. Rising wait with flat depth means worker starvation rather than backlog.",
+        "query": "timeseries q = percentile(workqueue_queue_duration_seconds, 95, rollup: avg), by:{name}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and in(name, {\"sandbox\", \"sandboxclaim\", \"sandboxtemplate\", \"sandboxwarmpool\"})",
+        "querySettings": {},
+        "title": "Workqueue wait p95 by controller",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "14": {
+        "description": "Total reconciles in the selected window. The small, persistent 'sandbox / error' bar is the benign resource-version race — expect it to be non-zero on a perfectly healthy cluster.",
+        "query": "timeseries r = sum(controller_runtime_reconcile_total), by:{controller, result}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and in(controller, {\"sandbox\", \"sandboxclaim\", \"sandboxtemplate\", \"sandboxwarmpool\"})\n| fieldsAdd total = arraySum(r)\n| filter total > 0\n| fields controller, result, total\n| sort total desc",
+        "querySettings": {},
+        "title": "Reconcile throughput by controller and result",
+        "type": "data",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "categoricalBarChart": {
+            "categoryAxis": [
+              "controller",
+              "result"
+            ],
+            "categoryAxisLabel": "controller / result",
+            "valueAxis": [
+              "total"
+            ],
+            "valueAxisLabel": "reconciles"
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "15": {
+        "description": "The v1alpha1 <-> v1beta1 conversion webhook. A failing /convert breaks every CRD API call, including kubectl get sandbox. Watch for any code other than 200.",
+        "query": "timeseries w = sum(controller_runtime_webhook_requests_total, default:0), by:{code, webhook}, filter: k8s.cluster.name == \"agent-sandbox-demo\"",
+        "querySettings": {},
+        "title": "Conversion webhook health (/convert)",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "16": {
+        "description": "Structured error records parsed from controller stdout. Expect a steady trickle of 'Failed to update sandbox status' / 'Reconciler error' carrying 'the object has been modified' — that pair is the benign race, not an incident.",
+        "query": "fetch logs\n| filter k8s.namespace.name == \"agent-sandbox-system\" and k8s.container.name == \"agent-sandbox-controller\"\n| parse content, \"JSON:j\"\n| fieldsAdd lvl = j[level], msg = j[msg], ctrl = j[controller], err = j[error]\n| filter lvl == \"error\"\n| fields timestamp, ctrl, msg, err\n| sort timestamp desc\n| limit 50",
+        "querySettings": {},
+        "title": "Controller error log stream (triage, not alerting)",
+        "type": "data",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": {
+            "enableSparklines": false,
+            "linewrapEnabled": false
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "17": {
+        "content": "## Sandbox resource usage — measured from *outside* the sandbox\n\n⚠️ **`/proc` inside gVisor reports the HOST's memory.** A pod with a 256 Mi limit reads `MemTotal: 12248276 kB` — the node's 12 GiB. Anything that self-reports resources from inside a sandbox (Python `psutil`, Node `os.totalmem()`, JVM ergonomics) is wrong, and a runtime that sizes its heap from `MemTotal` will size for 12 GiB inside a 256 Mi container and get OOM-killed.\n\nThese two tiles come from **`kubeletstats` on the node DaemonSet** — outside the sandbox boundary, where the numbers are true. Compare the ~20–25 MiB working set below against the 12 GiB the sandbox believes it has.\n\n*Scoping note:* neither `kubeletstats` nor `k8sattributes` surfaces `runtimeClassName`, and the `agents.x-k8s.io/sandbox-name-hash` pod label appears in series metadata but is not usable as a `timeseries` split dimension. Sandbox pods are therefore scoped by namespace (`default`), which on this cluster contains exactly the sandbox pods.",
+        "type": "markdown"
+      },
+      "18": {
+        "query": "timeseries cpu = avg(k8s.pod.cpu.usage), by:{k8s.pod.name}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and k8s.namespace.name == \"default\"",
+        "querySettings": {},
+        "title": "Sandbox pod CPU (kubeletstats — outside the sandbox)",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "19": {
+        "query": "timeseries mem = avg(k8s.pod.memory.working_set), by:{k8s.pod.name}, filter: k8s.cluster.name == \"agent-sandbox-demo\" and k8s.namespace.name == \"default\"",
+        "querySettings": {},
+        "title": "Sandbox pod memory working set (truth, vs the 12 GiB /proc claims)",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "2": {
+        "description": "warm / (warm + cold) across all claim-owned sandboxes. A pool that is never adopted from reads 0%.",
+        "query": "timeseries { warm = avg(agent_sandboxes, default:0, filter: launch_type == \"warm\"), cold = avg(agent_sandboxes, default:0, filter: launch_type == \"cold\") }, filter: owned_by == \"SandboxClaim\" and k8s.cluster.name == \"agent-sandbox-demo\"\n| fieldsAdd w = arraySum(warm), c = arraySum(cold)\n| fieldsAdd hitRate = if(w + c > 0, 100.0 * w / (w + c), else: 0.0)\n| fields hitRate",
+        "querySettings": {},
+        "title": "Warm-pool hit rate (SandboxClaim)",
+        "type": "data",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": {
+            "alignment": "center",
+            "autoscale": true,
+            "colorThresholdTarget": "value",
+            "label": "warm-pool hit rate %",
+            "prefixIcon": "",
+            "recordField": "hitRate",
+            "showLabel": true
+          },
+          "thresholds": [],
+          "unitsOverrides": [
+            {
+              "baseUnit": "percent",
+              "decimals": 1,
+              "delimiter": false,
+              "displayUnit": null,
+              "identifier": "hitRate",
+              "suffix": "%",
+              "unitCategory": "percentage"
+            }
+          ]
+        }
+      },
+      "20": {
+        "content": "## Sandbox lifecycle stream\n\n**The agent-sandbox controller emits zero Kubernetes Events for its own CRDs** — `kubectl describe sandbox` shows no event history, and Dynatrace's built-in Kubernetes event alerting is blind to sandbox lifecycle. The stream below is the compensating control: a `k8sobjects` receiver in **watch** mode over all four CRDs, with `managedFields` and `last-applied-configuration` stripped (3907 → 1084 bytes, 72% smaller) and the useful fields lifted into flat `agentsandbox.*` attributes so no JSON parsing is needed in DQL.",
+        "type": "markdown"
+      },
+      "21": {
+        "description": "Every create, modify and delete of an agent-sandbox custom resource. This is the only sandbox lifecycle history that exists, because the controller publishes no Events.",
+        "query": "fetch logs\n| filter k8s.cluster.name == \"agent-sandbox-demo\" and isNotNull(agentsandbox.kind) and agentsandbox.kind != \"Event\"\n| fields timestamp, agentsandbox.watch.type, agentsandbox.kind, agentsandbox.namespace, agentsandbox.name, agentsandbox.launch_type, agentsandbox.operating_mode, agentsandbox.ready_status, agentsandbox.ready_reason\n| sort timestamp desc\n| limit 50",
+        "querySettings": {},
+        "title": "CR watch stream — Sandbox / SandboxClaim / SandboxTemplate / SandboxWarmPool",
+        "type": "data",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": {
+            "enableSparklines": false,
+            "linewrapEnabled": false
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "3": {
+        "description": "What the sandboxclaim controller actually decided, parsed from its structured JSON stdout. 'BYPASSED (custom config)' is the silent warm-pool killer.",
+        "query": "fetch logs\n| filter k8s.namespace.name == \"agent-sandbox-system\" and k8s.container.name == \"agent-sandbox-controller\"\n| parse content, \"JSON:j\"\n| fieldsAdd msg = j[msg]\n| filter in(msg, {\"Successfully adopted sandbox from warm pool\", \"Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)\", \"creating sandbox from template\"})\n| fieldsAdd decision = if(msg == \"Successfully adopted sandbox from warm pool\", \"WARM HIT\", else: if(msg == \"Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)\", \"BYPASSED (custom config)\", else: \"COLD CREATE\"))\n| summarize c = count(), by:{decision}\n| sort c desc",
+        "querySettings": {},
+        "title": "Warm-pool decision breakdown",
+        "type": "data",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "categoricalBarChart": {
+            "categoryAxis": [
+              "decision"
+            ],
+            "categoryAxisLabel": "decision",
+            "valueAxis": [
+              "c"
+            ],
+            "valueAxisLabel": "count"
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "4": {
+        "description": "cold vs warm over time for SandboxClaim-owned sandboxes. A flat line at cold with zero warm is the failure mode.",
+        "query": "timeseries sb = avg(agent_sandboxes, default:0), by:{launch_type}, filter: owned_by == \"SandboxClaim\" and k8s.cluster.name == \"agent-sandbox-demo\"",
+        "querySettings": {},
+        "title": "Claim-owned sandboxes by launch type",
+        "type": "data",
+        "visualization": "areaChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "5": {
+        "description": "The proof tile. Each SandboxClaim and the decision the controller logged for it. Claims carrying spec.env appear as 'Bypassing warm pool adoption'; the env-free claim adopts a pooled sandbox.",
+        "query": "fetch logs\n| filter k8s.namespace.name == \"agent-sandbox-system\" and k8s.container.name == \"agent-sandbox-controller\"\n| parse content, \"JSON:j\"\n| fieldsAdd msg = j[msg], claim = j[name], ns = j[namespace]\n| filter msg == \"Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)\" or msg == \"Successfully adopted sandbox from warm pool\"\n| fieldsAdd verdict = if(msg == \"Successfully adopted sandbox from warm pool\", \"WARM HIT\", else: \"BYPASSED — custom config (spec.env / volumeClaimTemplates)\")\n| fields timestamp, ns, claim, verdict\n| sort timestamp desc\n| limit 50",
+        "querySettings": {},
+        "title": "Per-claim warm-pool verdict (which claim got bypassed, and why)",
+        "type": "data",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": {
+            "enableSparklines": false,
+            "linewrapEnabled": false
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "6": {
+        "content": "## Fleet inventory\n\n`agent_sandboxes` is a point-in-time gauge whose label set encodes *how* each sandbox came to exist. Cardinality is bounded and safe (48 combinations per namespace × template) — no dimensional-explosion risk.",
+        "type": "markdown"
+      },
+      "7": {
+        "description": "The whole fleet: who owns each sandbox (None = hand-written, SandboxWarmPool = pooled member, SandboxClaim = claim-bound) and how it started.",
+        "query": "timeseries sb = avg(agent_sandboxes, default:0), by:{owned_by, launch_type, sandbox_template}, filter: k8s.cluster.name == \"agent-sandbox-demo\"",
+        "querySettings": {},
+        "title": "Sandbox inventory by owner and launch type",
+        "type": "data",
+        "visualization": "areaChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "8": {
+        "description": "Mirrors Sandbox.status.conditions[Ready]. A sustained ready_condition=false series is the alertable signal; a brief blip is a normal cold start or a suspend.",
+        "query": "timeseries sb = avg(agent_sandboxes, default:0), by:{ready_condition}, filter: k8s.cluster.name == \"agent-sandbox-demo\"",
+        "querySettings": {},
+        "title": "Readiness — not-ready sandboxes",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      },
+      "9": {
+        "description": "expired=true means the sandbox is past spec.shutdownTime. Anything non-zero here for long is a garbage-collection leak — you are paying for sandboxes that should be gone.",
+        "query": "timeseries sb = avg(agent_sandboxes, default:0), by:{expired}, filter: k8s.cluster.name == \"agent-sandbox-demo\"",
+        "querySettings": {},
+        "title": "Expired but still alive (reclamation leak)",
+        "type": "data",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "chartSettings": {
+            "categoricalBarChartSettings": {},
+            "categoryOverrides": {},
+            "circleChartSettings": {
+              "groupingThresholdType": "relative"
+            },
+            "gapPolicy": "connect",
+            "hiddenLegendFields": []
+          },
+          "thresholds": [],
+          "unitsOverrides": []
+        }
+      }
+    },
+    "variables": [],
+    "version": 21
+  }
+}
