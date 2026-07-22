@@ -68,15 +68,22 @@ echo "4. Model-backend address is substituted, not hard-coded"
 # (Matching the source text is how the first version of this check produced a
 # false failure: the pattern in deploy.sh is escaped, `10\.0\.0\.189`.)
 OLLAMA_HOST=203.0.113.99   # TEST-NET-3, unmistakable in the output
+
+# Derive the placeholder from the EndpointSlice rather than hard-coding it —
+# the published copy of this repo carries documentation addresses, not the ones
+# the episode was filmed against, and the check has to hold for both.
+PLACEHOLDER=$(sed -n 's/^ *- *"\([0-9.]\{7,\}\)".*/\1/p' "${HERE}/agent-sandbox/ollama-endpoint.yaml" | head -1)
+[ -n "$PLACEHOLDER" ] || note "could not read the model address out of ollama-endpoint.yaml"
+
 for f in agent-sandbox/ollama-endpoint.yaml agent-sandbox/openclaw-netpol.yaml agent-sandbox/openclaw-netpol-cilium.yaml; do
   base="${f##*/}"
-  grep -qE '10\.0\.0\.189' "${HERE}/$f" || { note "$base lost the placeholder that deploy.sh targets"; continue; }
+  grep -qF "$PLACEHOLDER" "${HERE}/$f" || { note "$base does not carry the model address $PLACEHOLDER that deploy.sh targets"; continue; }
   cmd=$(grep -E "^ *sed .*${base}" "${HERE}/deploy.sh" | head -1 | sed 's#| *kubectl.*##')
   [ -n "$cmd" ] && cmd=${cmd//\$\{HERE\}/$HERE}
   if [ -z "$cmd" ]; then note "$base carries a placeholder IP but deploy.sh applies it unsubstituted"; continue; fi
   out=$(eval "$cmd") || { note "$base substitution command failed to run"; continue; }
   # Ignore comments: the cilium policy quotes measured results verbatim on purpose.
-  leftover=$(grep -vE '^\s*#' <<<"$out" | grep -cE '10\.0\.0\.189' || true)
+  leftover=$(grep -vE '^\s*#' <<<"$out" | grep -cF "$PLACEHOLDER" || true)
   if grep -q '203.0.113.99' <<<"$out" && [ "$leftover" -eq 0 ]; then
     ok "$base rewritten to \$OLLAMA_HOST"
   else
