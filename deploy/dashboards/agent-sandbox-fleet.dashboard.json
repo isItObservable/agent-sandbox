@@ -1,6 +1,5 @@
 {
   "name": "agent-sandbox — Fleet, Warm Pool & Isolation",
-  "isPrivate": true,
   "type": "dashboard",
   "content": {
     "version": 21,

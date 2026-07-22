@@ -231,3 +231,50 @@ that ratio before blaming the operator.
 Moving the control-plane boot volume off shared storage is the actual fix;
 it was deliberately deferred here so the telemetry capture ran against the
 degraded cluster and these tiles could be validated against real resets.
+
+## Before you commit a dashboard export
+
+Run the verifier:
+
+```bash
+python3 verify_export.py agent-sandbox-fleet.dashboard.json
+```
+
+Exit 0 means the file is safe to publish *and* safe for a reader to import. It
+checks four things, each of which is a defect that actually shipped during this
+episode rather than a hypothetical:
+
+1. **Tenant export metadata** — `id`, `owner`, `version`, `modificationInfo`,
+   `isPrivate`. `id` is the dangerous one: `dtctl apply` on a file that carries
+   an `id` **updates that dashboard** instead of creating a new one, so a reader
+   importing this file would silently mutate the author's tenant.
+2. **Internal infrastructure names** — cluster names, tenant IDs. Real Dynatrace
+   tenant URLs and `dt0c01.` tokens are matched unconditionally; your own
+   site-specific names come from the environment, because a denylist of real
+   internal names committed to a public repo would itself be the leak:
+
+   ```bash
+   DASHBOARD_INTERNAL_NAMES="my-prod-cluster,abc12345" \
+     python3 verify_export.py agent-sandbox-fleet.dashboard.json
+   ```
+
+   Unset, that check is a no-op and the verifier says so.
+3. **Placeholder/JSON agreement** — that the `agent-sandbox-demo` string the
+   instructions tell you to search for is actually present in the JSON.
+4. **Tile/layout id pairing** and that every `workqueue_*` /
+   `controller_runtime_*` tile is scoped by `k8s.cluster.name` (those metric
+   names collide across clusters in a shared tenant).
+
+### Export the authoring copy, not the download
+
+There are two exports of the same dashboard and they are not interchangeable:
+
+| File | Carries | Use for |
+|---|---|---|
+| `*.dashboard.json` | `name`, `type`, `content` | **publishing** and creating |
+| `*.deployed.json` | the above **+** `id`, `owner`, `version`, `modificationInfo`, `isPrivate` | **updating** the live dashboard (download-first) |
+
+Publishing the download is the easy mistake, because it is the file you have
+right after a deploy. Hand-stripping it is not reliable — `isPrivate` survived
+two separate scrub passes on this episode before the verifier caught it. Start
+from `*.dashboard.json` and let the verifier confirm.
