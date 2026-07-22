@@ -507,7 +507,7 @@ egress:
 
 "The internet, yes; anything private, no" — a defensible default for untrusted
 code, and it takes out *both* halves of a self-hosted backend at once, because
-kube-dns (10.96.0.10) and a LAN Ollama (10.0.0.x) are both RFC1918. Measured
+kube-dns (10.96.0.10) and a LAN Ollama (10.20.30.x) are both RFC1918. Measured
 from a live pool member: DNS `ENOTFOUND`, `connect 10.20.30.30:6443` timeout.
 The same rule blocks the WebUI, from the other direction — ingress is admitted
 only from the in-cluster `sandbox-router`, so a LoadBalancer reaches the pod and
