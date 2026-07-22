@@ -26,7 +26,7 @@ observability backend.
    primitive.
 2. **The isolation model.** A Sandbox is just a Pod, so isolation is layered:
    `runtimeClassName: gvisor` for the kernel boundary, NetworkPolicy for egress,
-   a PVC for the workspace. We prove the kernel boundary on camera with a single
+   a PVC for the workspace. We prove the kernel boundary with a single
    string: `4.19.0-gvisor`.
 3. **The lifecycle that makes it cheap.** Warm pools for instant allocation,
    `operatingMode: Suspended` for hibernation, `shutdownTime` for TTL — and what

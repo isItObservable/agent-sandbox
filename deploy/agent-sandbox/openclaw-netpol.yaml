@@ -21,15 +21,15 @@
 #      RESOLVE AT ALL from a pooled sandbox. Measured from a live pool member:
 #        dns.lookup("kubernetes.default.svc.cluster.local") -> ENOTFOUND
 #      versus the same lookup from `demo-agent` -> 10.96.0.1.
-#   2. A LAN Ollama at 10.0.0.x is inside the same exception. Measured:
-#        connect 10.0.0.230:6443 -> TIMEOUT
+#   2. A LAN Ollama at 10.20.30.x is inside the same exception. Measured:
+#        connect 10.20.30.30:6443 -> TIMEOUT
 #
 # THE PART THAT MAKES IT A TRAP RATHER THAN A BUG: `demo-agent` is a bare
 # `Sandbox`, not template-derived, so NO policy selects it and everything works.
 # You wire Ollama, test it against demo-agent, see it answer, then move to the
 # warm pool for the real demo — and the agent goes silent at exactly the moment
 # you stop watching. The failure is a timeout inside the agent's model call, so
-# what you see on camera is an agent that "thinks" forever, not an error.
+# what you see is an agent that "thinks" forever, not an error.
 #
 # Kubernetes NetworkPolicies are additive for ALLOW, so this file unions the two
 # holes back in without touching the controller-generated policy (which you
@@ -76,7 +76,7 @@ spec:
     # Keep this address in sync with ollama-endpoint.yaml.
     - to:
         - ipBlock:
-            cidr: 10.0.0.189/32
+            cidr: 10.20.30.10/32
       ports:
         - protocol: TCP
           port: 11434
@@ -87,7 +87,7 @@ spec:
     # the real client IP, so this rule can name the LAN instead of 0.0.0.0/0.
     - from:
         - ipBlock:
-            cidr: 10.0.0.0/24
+            cidr: 10.20.30.0/24
       ports:
         - protocol: TCP
           port: 18789

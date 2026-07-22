@@ -508,7 +508,7 @@ egress:
 "The internet, yes; anything private, no" — a defensible default for untrusted
 code, and it takes out *both* halves of a self-hosted backend at once, because
 kube-dns (10.96.0.10) and a LAN Ollama (10.0.0.x) are both RFC1918. Measured
-from a live pool member: DNS `ENOTFOUND`, `connect 10.0.0.230:6443` timeout.
+from a live pool member: DNS `ENOTFOUND`, `connect 10.20.30.30:6443` timeout.
 The same rule blocks the WebUI, from the other direction — ingress is admitted
 only from the in-cluster `sandbox-router`, so a LoadBalancer reaches the pod and
 the packet is dropped and the browser simply hangs.
@@ -523,26 +523,26 @@ template's contents, so keying a policy to it means the policy silently stops
 matching anything the next time you edit the template.
 
 What the agent sees when this is wrong is the worst part: the model call hangs
-until it times out, so on camera you get an agent that thinks forever, not an
+until it times out, so you get an agent that thinks forever, not an
 error.
 
 ### Trap 3 — the narrow allow rule that opened the whole host ⚠️
 
-`openclaw-netpol.yaml` allows `10.0.0.189/32` on port `11434` and nothing else.
+`openclaw-netpol.yaml` allows `10.20.30.10/32` on port `11434` and nothing else.
 Read as written that is airtight. Measured from inside the sandbox with only
 that policy applied:
 
 | target | result |
 |---|---|
-| `10.0.0.189:11434` | open — the model backend, as intended |
-| `10.0.0.189:22` | **open** — SSH on the model host |
-| `10.0.0.189:11435` | `ECONNREFUSED` — host reached, port simply shut |
-| `10.0.0.230:22` (control-plane) | timeout — still blocked |
-| `10.0.0.232:22` (worker) | timeout — still blocked |
+| `10.20.30.10:11434` | open — the model backend, as intended |
+| `10.20.30.10:22` | **open** — SSH on the model host |
+| `10.20.30.10:11435` | `ECONNREFUSED` — host reached, port simply shut |
+| `10.20.30.30:22` (control-plane) | timeout — still blocked |
+| `10.20.30.31:22` (worker) | timeout — still blocked |
 
 Only the address we named opened up, and it opened on **every port**, to a
 sandbox whose entire purpose is running code somebody else wrote. Naming
-`10.0.0.189/32` gives Cilium a distinct identity for that address, which the
+`10.20.30.10/32` gives Cilium a distinct identity for that address, which the
 other policy's `0.0.0.0/0` rule then matches — the `except` stops covering it.
 Our port restriction only ever constrained *our* rule.
 
@@ -593,7 +593,7 @@ The page loads, looks perfect and cannot authenticate. Add the real origin:
 "gateway": {
   "bind": "lan",
   "auth": { "mode": "token" },
-  "controlUi": { "allowedOrigins": ["http://10.0.0.241:18789"] }
+  "controlUi": { "allowedOrigins": ["http://10.20.30.20:18789"] }
 }
 ```
 
@@ -609,7 +609,7 @@ non-loopback, which makes token auth mandatory; verify it is actually enforced
 rather than assuming:
 
 ```console
-$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://10.0.0.241:18789/tools/invoke \
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://10.20.30.20:18789/tools/invoke \
     -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"id"}}'
 401
 ```
@@ -620,8 +620,8 @@ a hole; `/tools/invoke` and `/api/channels/*` are the surfaces that matter, and
 they are fail-closed. A 200 from `/tools/invoke` means anyone on the LAN owns
 the sandbox.
 
-Keep the token off camera: paste it off-recording or pre-authenticate the tab
-before you hit record.
+Treat the token like any other credential: do not paste it anywhere it will be
+logged or shared, and rotate it if it leaks.
 
 ---
 

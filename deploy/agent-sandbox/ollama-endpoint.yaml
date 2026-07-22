@@ -52,6 +52,6 @@ endpoints:
       # >>> EDIT ME <<< the LAN address of the host running `ollama serve`.
       # It must be bound to 0.0.0.0, not loopback: `OLLAMA_HOST=0.0.0.0:11434`.
       # This same address must appear in openclaw-netpol.yaml's egress rule.
-      - "10.0.0.189"
+      - "10.20.30.10"
     conditions:
       ready: true

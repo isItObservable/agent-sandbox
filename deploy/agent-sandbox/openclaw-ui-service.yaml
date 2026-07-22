@@ -27,8 +27,8 @@
 #   curl -s -o /dev/null -w '%{http_code}\n' http://<EXTERNAL-IP>:18789/   # 401
 #
 # A 200 there means the token is not wired and anyone on the LAN owns the
-# sandbox. Never put the token itself on screen: paste it into the browser
-# off-camera, or pre-authenticate the tab before recording.
+# sandbox. Treat the token like any other credential -- do not paste it anywhere
+# it will be logged or shared, and rotate it if it leaks.
 # ============================================================================
 apiVersion: v1
 kind: Service
@@ -46,7 +46,9 @@ spec:
   # auto-assign and a cluster rebuild hands you .242, the origin check fails,
   # and the UI loads but cannot log in. Keep this in sync with the
   # `allowedOrigins` entry in demo-sandbox.yaml's ConfigMap.
-  loadBalancerIP: 10.0.0.241
+  # >>> EDIT ME <<< an address from your MetalLB pool. Must match the
+  # `allowedOrigins` entry in demo-sandbox.yaml's ConfigMap.
+  loadBalancerIP: 10.20.30.20
   externalTrafficPolicy: Local
   selector:
     app: openclaw

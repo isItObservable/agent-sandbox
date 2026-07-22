@@ -10,7 +10,7 @@
 # Secret had been created by hand, so the check compared the manifests against
 # a cluster that deploy.sh had never built. deploy.sh still created
 # ANTHROPIC_API_KEY. A clean-room install would have failed at
-# CreateContainerConfigError, on camera, and nothing in the repo said so.
+# CreateContainerConfigError, and nothing in the repo said so.
 #
 # The lesson generalises past this one key: "it matches the running cluster" is
 # not the same claim as "the installer produces it". This asserts the second.
@@ -66,7 +66,7 @@ echo "4. Model-backend address is substituted, not hard-coded"
 # rewrites from $OLLAMA_HOST. Don't pattern-match the sed expression — RUN the
 # line deploy.sh actually runs, with a distinctive host, and look at the output.
 # (Matching the source text is how the first version of this check produced a
-# false failure: the pattern in deploy.sh is escaped, `10\.0\.0\.189`.)
+# false failure: the pattern in deploy.sh is escaped, `10\.20\.30\.10`.)
 OLLAMA_HOST=203.0.113.99   # TEST-NET-3, unmistakable in the output
 
 # Derive the placeholder from the EndpointSlice rather than hard-coding it —
