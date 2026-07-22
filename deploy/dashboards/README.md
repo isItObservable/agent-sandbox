@@ -17,7 +17,7 @@ dtctl apply -f agent-sandbox-fleet.dashboard.json
 Every source metric is confirmed present with the pipeline in
 [`../collectors/`](../collectors/) — see
 [`../../OBSERVABILITY.md`](../../OBSERVABILITY.md) for how each one was verified.
-All 16 data tiles were validated against live data before deployment.
+All 19 data tiles were validated against live data before deployment.
 
 ## Why this dashboard has no trace tiles
 
@@ -163,3 +163,71 @@ and `loglevel` reads `NONE`. Tiles that need `msg` or `level` parse it inline:
 
 Adding a `json_parser` operator to the `filelog` receiver would promote these to
 first-class attributes and make the tiles cheaper — a worthwhile follow-up.
+
+## Counter validity — telling an agent-sandbox fault from an NFS artifact
+
+This cluster's control-plane boot volume sits on shared NFS. etcd fsyncs over
+the network, `/proc/pressure/io full avg300` sits around **17%**, probes flap,
+and pods restart. The agent-sandbox controller restarted once during capture
+(`09:07:18Z`). The obvious worry is that the controller counters sawtooth and
+read as an operator fault. **They do not** — and the reason is worth knowing,
+because the real artifact points the other way.
+
+### Measured, not assumed
+
+`controller_runtime_*` and `workqueue_*` reach Grail as **delta** counters, not
+cumulative ones. A `timeseries sum(...)` bucket already holds the per-interval
+increment, so the series across the restart reads
+
+```
+09:01  39     09:02   0     09:03  16     09:04  18     09:05   8
+```
+
+— never a monotone ramp. A cumulative store would have returned scrape-count ×
+value per bucket and climbed forever. **These counters cannot sawtooth.**
+
+The actual reset artifact is the opposite of a spike: a **silent under-count**.
+The first post-restart scrape becomes the new delta baseline, so the
+controller's start-up reconcile burst — 7 reconciles after `09:07:18Z` — is
+swallowed and never reaches Grail at all. Windowed totals read **low**, not
+jagged. That failure mode is much harder to notice than a sawtooth, which is
+exactly why the section is on the dashboard rather than only in this file.
+
+`agent_sandboxes` is a gauge recomputed from cluster state on every scrape, so
+it is unaffected. **Every warm-pool and fleet tile is reset-immune.**
+
+### Which pods actually restart
+
+The league-table tile answers this directly, and the answer is not what the
+"apiserver flapping" framing suggests:
+
+| Container | Restarts |
+|---|---|
+| `kube-controller-manager` | 26 |
+| `kube-vip` | 25 |
+| `cilium-operator` | 22 |
+| `kube-scheduler` | 21 |
+| **`agent-sandbox-controller`** | **1** |
+| `etcd` | **0** |
+| `kube-apiserver` | **0** |
+
+etcd and the apiserver never restart. The casualties are the **leader-election
+clients** — they lose their lease when etcd stalls on an NFS fsync and exit.
+The workload under test restarted once against 20+ for the control plane; read
+that ratio before blaming the operator.
+
+### Rules for the tiles
+
+- **Never chart a cumulative total** of a controller counter. Use
+  `sum(..., rate: 1m)` (the reset-safe rate tile) or a windowed sum of deltas
+  (the throughput bar chart) — both tolerate resets.
+- **Cross-check every discontinuity** against the restart-boundary tile before
+  treating it as signal. Observed blip windows during capture:
+  `09:07:08–09:07:18Z` and `09:23:07–09:23:15Z`.
+- The p95 histogram tiles lose one interval per restart for the same
+  baseline reason. They are already labelled as a percentile-of-averages
+  (`rollup: avg`); the gap is data loss, not a latency improvement.
+
+Moving the control-plane boot volume off shared storage is the actual fix;
+it was deliberately deferred here so the telemetry capture ran against the
+degraded cluster and these tiles could be validated against real resets.
