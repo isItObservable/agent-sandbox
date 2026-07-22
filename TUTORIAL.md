@@ -230,12 +230,24 @@ and a gateway token:
 
 ```bash
 kubectl create secret generic openclaw-secrets -n default \
-  --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+  --from-literal=OLLAMA_API_KEY=ollama-local \
   --from-literal=OPENCLAW_GATEWAY_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+
+# The model backend this config resolves at boot — Step 7b explains why it is
+# off-cluster and what to edit. Apply it BEFORE the Sandbox.
+kubectl apply -f deploy/agent-sandbox/ollama-endpoint.yaml
 
 kubectl apply -f deploy/agent-sandbox/demo-sandbox.yaml
 kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m
 ```
+
+> `OLLAMA_API_KEY=ollama-local` is **not a credential** — it is the literal
+> marker OpenClaw expects for a local/LAN Ollama daemon that needs no auth. The
+> gateway token on the next line is the real secret. If you point this demo at a
+> hosted backend instead, that line becomes `ANTHROPIC_API_KEY` (or
+> `GEMINI_`/`OPENAI_`/`OPENROUTER_`) and the key names in `demo-sandbox.yaml`
+> and `openclaw-pool.yaml` must change to match — they are mounted by name, and
+> a mismatch shows up as `CreateContainerConfigError`, not as a clear message.
 
 > The first pull is **~324 MB**, so on a node that has never seen the image
 > expect **~2.5 minutes** before the pod even starts. That number is the whole

@@ -10,7 +10,8 @@
 #   3. gVisor (runsc) RuntimeClass + node installer DaemonSet
 #   4. agent-sandbox controller v0.5.2 (+ extensions: Template/WarmPool/Claim)
 #   5. OTel Collectors                 (gateway Deployment + node DaemonSet)
-#   6. The demo Sandbox                (an agent running under gVisor)
+#   6. The demo Sandbox                (an agent running under gVisor), its
+#                                      model backend, LoadBalancer + egress policy
 #
 # TUTORIAL.md walks through every one of these by hand, with the explanation.
 # This script is the shortcut for people who already know why.
@@ -21,10 +22,19 @@ set -euo pipefail
 : "${DT_OPERATOR_TOKEN:?set DT_OPERATOR_TOKEN (Dynatrace API token)}"
 : "${DT_INGEST_TOKEN:?set DT_INGEST_TOKEN (data-ingest token)}"
 
-# OpenClaw needs at least one model-provider key. The gateway binds to a
-# non-loopback address (so the Sandbox Service can reach it), which makes token
-# auth mandatory.
-: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY (or edit deploy.sh for GEMINI/OPENAI/OPENROUTER)}"
+# The model backend. This demo runs self-hosted Ollama on a host OUTSIDE the
+# cluster — see agent-sandbox/ollama-endpoint.yaml for why (a 32B model needs
+# ~20 GB and there is no GPU here). Give the LAN address of a host running
+# `ollama serve` bound to 0.0.0.0.
+: "${OLLAMA_HOST:?set OLLAMA_HOST, the LAN IP of the host running \`ollama serve\` (e.g. 10.0.0.189)}"
+
+# OpenClaw needs at least one model-provider key. For a local/LAN Ollama daemon
+# it expects the literal marker `ollama-local` — that is NOT a credential, it is
+# how OpenClaw spells "this provider needs no auth". The gateway token below is
+# the real secret: the gateway binds to a non-loopback address (so the Sandbox
+# Service, and openclaw-ui-service.yaml, can reach it), which makes token auth
+# mandatory.
+OLLAMA_API_KEY="${OLLAMA_API_KEY:-ollama-local}"
 OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=')}"
 
 AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.2}"
@@ -87,15 +97,41 @@ done
 # --- 6. Demo sandbox ---------------------------------------------------------
 say "Demo agent Sandbox (OpenClaw under gVisor)"
 kubectl create secret generic openclaw-secrets -n default \
-  --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+  --from-literal=OLLAMA_API_KEY="${OLLAMA_API_KEY}" \
   --from-literal=OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+# The model backend, BEFORE the sandbox — openclaw.json resolves
+# `ollama.default.svc.cluster.local` at boot. Same sed-substitution shape as the
+# DynaKube above: the address is the one environment-specific value here.
+sed "s#\"10.0.0.189\"#\"${OLLAMA_HOST}\"#" "${HERE}/agent-sandbox/ollama-endpoint.yaml" | kubectl apply -f -
+
 kubectl apply -f "${HERE}/agent-sandbox/demo-sandbox.yaml"
+kubectl apply -f "${HERE}/agent-sandbox/openclaw-ui-service.yaml"
+
+# Egress. The controller generates its own policy for template-derived
+# sandboxes and REVERTS edits to it, so the holes are unioned back from here.
+# Without this the agent cannot reach the model and the LoadBalancer's packets
+# are dropped — the browser just hangs. TUTORIAL.md Step 7b explains the trap.
+sed "s#10\.0\.0\.189/32#${OLLAMA_HOST}/32#" "${HERE}/agent-sandbox/openclaw-netpol.yaml" | kubectl apply -f -
+
+# ...and the confinement for that allow. A /32 + single-port allow does NOT
+# restrict the host to that port — it opens EVERY port on it, SSH included.
+# Cilium-only, so apply it only if the CRD is present; on another CNI you must
+# find your own equivalent before exposing a code-executing sandbox.
+if kubectl get crd ciliumnetworkpolicies.cilium.io >/dev/null 2>&1; then
+  sed "s#10\.0\.0\.189/32#${OLLAMA_HOST}/32#" "${HERE}/agent-sandbox/openclaw-netpol-cilium.yaml" | kubectl apply -f -
+else
+  echo "    !! CNI is not Cilium: the /32 egress allow leaves EVERY port on ${OLLAMA_HOST}"
+  echo "       reachable from the sandbox (verify with 'nc -z ${OLLAMA_HOST} 22')."
+fi
 
 # First pull of ghcr.io/openclaw/openclaw:slim is ~324 MB — allow a few minutes
 # on a node that has never seen it.
 kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m || true
 
 say "Done. Next: kubectl get sandbox,sandboxclaim,sandboxwarmpool -A"
+echo "    WebUI:                     http://10.0.0.241:18789  (expect 401 until you"
+echo "                               paste OPENCLAW_GATEWAY_TOKEN — a 200 means auth is off)"
 echo "    Drive the full lifecycle:  kubectl apply -f ${HERE}/agent-sandbox/lifecycle-driver.yaml"
 echo "    Then follow TUTORIAL.md from Step 7 to read the telemetry."
