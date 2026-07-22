@@ -23,10 +23,21 @@ set -euo pipefail
 : "${DT_INGEST_TOKEN:?set DT_INGEST_TOKEN (data-ingest token)}"
 
 # The model backend. This demo runs self-hosted Ollama on a host OUTSIDE the
-# cluster — see agent-sandbox/ollama-endpoint.yaml for why (a 32B model needs
-# ~20 GB and there is no GPU here). Give the LAN address of a host running
+# cluster — see agent-sandbox/ollama-endpoint.yaml for why (the demo model is
+# 81.4 GB and there is no GPU here). Give the LAN address of a host running
 # `ollama serve` bound to 0.0.0.0.
 : "${OLLAMA_HOST:?set OLLAMA_HOST, the LAN IP of the host running \`ollama serve\` (e.g. 10.20.30.10)}"
+
+# Where the WebUI is published. This is NOT cosmetic and NOT optional: it must
+# be an address inside your MetalLB pool, because OpenClaw's Control UI refuses
+# to authenticate from any browser origin not listed in
+# gateway.controlUi.allowedOrigins -- so the address is baked into the agent's
+# own config as well as the Service. Both are substituted from this one value.
+: "${WEBUI_IP:?set WEBUI_IP, an address from your MetalLB pool to publish the WebUI on (e.g. 10.20.30.20)}"
+
+# Who may reach that WebUI. Defaults to the /24 the WebUI address sits in, which
+# is the LAN in every layout this episode covers. Narrow it if you can.
+LAN_CIDR="${LAN_CIDR:-${WEBUI_IP%.*}.0/24}"
 
 # OpenClaw needs at least one model-provider key. For a local/LAN Ollama daemon
 # it expects the literal marker `ollama-local` — that is NOT a credential, it is
@@ -106,14 +117,19 @@ kubectl create secret generic openclaw-secrets -n default \
 # DynaKube above: the address is the one environment-specific value here.
 sed "s#\"10.20.30.10\"#\"${OLLAMA_HOST}\"#" "${HERE}/agent-sandbox/ollama-endpoint.yaml" | kubectl apply -f -
 
-kubectl apply -f "${HERE}/agent-sandbox/demo-sandbox.yaml"
-kubectl apply -f "${HERE}/agent-sandbox/openclaw-ui-service.yaml"
+# The WebUI address appears in TWO places that must agree -- the Service that
+# publishes it and the allowedOrigins list inside openclaw.json. Substituting
+# only one of them gives you a UI that loads and cannot log in.
+sed "s#10\.20\.30\.20#${WEBUI_IP}#g" "${HERE}/agent-sandbox/demo-sandbox.yaml" | kubectl apply -f -
+sed "s#10\.20\.30\.20#${WEBUI_IP}#g" "${HERE}/agent-sandbox/openclaw-ui-service.yaml" | kubectl apply -f -
 
 # Egress. The controller generates its own policy for template-derived
 # sandboxes and REVERTS edits to it, so the holes are unioned back from here.
 # Without this the agent cannot reach the model and the LoadBalancer's packets
 # are dropped — the browser just hangs. TUTORIAL.md Step 7b explains the trap.
-sed "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#" "${HERE}/agent-sandbox/openclaw-netpol.yaml" | kubectl apply -f -
+sed -e "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#" \
+    -e "s#10\.20\.30\.0/24#${LAN_CIDR}#" \
+    "${HERE}/agent-sandbox/openclaw-netpol.yaml" | kubectl apply -f -
 
 # ...and the confinement for that allow. A /32 + single-port allow does NOT
 # restrict the host to that port — it opens EVERY port on it, SSH included.
@@ -131,7 +147,7 @@ fi
 kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m || true
 
 say "Done. Next: kubectl get sandbox,sandboxclaim,sandboxwarmpool -A"
-echo "    WebUI:                     http://10.20.30.20:18789  (expect 401 until you"
+echo "    WebUI:                     http://${WEBUI_IP}:18789  (expect 401 until you"
 echo "                               paste OPENCLAW_GATEWAY_TOKEN — a 200 means auth is off)"
 echo "    Drive the full lifecycle:  kubectl apply -f ${HERE}/agent-sandbox/lifecycle-driver.yaml"
 echo "    Then follow TUTORIAL.md from Step 7 to read the telemetry."

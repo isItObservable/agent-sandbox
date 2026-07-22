@@ -457,13 +457,28 @@ worker-1        4   11.6Gi
 worker-2        4   11.6Gi
 ```
 
-A 32B model at q4 is ~20 GB of weights (`qwen3:32b` is 20.2 GB from the Ollama
-registry — check with `curl -s https://registry.ollama.ai/v2/library/qwen3/manifests/32b`).
-It does not fit in 11.6 GiB at any quantisation, there is no GPU, and on CPU it
-would answer at roughly 1–2 tokens/second even if it did. So Ollama runs on a
-host with the RAM for it and the sandbox reaches it over the LAN. If you want
-the model in-cluster instead, `qwen3:8b` is 5.2 GB and fits — every trap below
-still applies, because they are about DNS and egress, not about model size.
+This demo runs `qwen3.5:122B` — **81.4 GB** of weights at q4. It is not close,
+and even a 32B model would not fit (`qwen3:32b` is 20.2 GB against 11.6 GiB
+allocatable), there is no GPU, and on CPU either would answer at roughly 1–2
+tokens/second if it somehow loaded. So Ollama runs on a machine with the memory
+for it and the sandbox reaches it over the LAN.
+
+Ask the daemon rather than trusting a tag someone wrote down — model names get
+garbled, and a wrong one is a runtime error at the worst possible moment:
+
+```console
+$ curl -s http://$OLLAMA_HOST:11434/api/tags | jq -r '.models[].name'
+$ curl -s http://$OLLAMA_HOST:11434/api/show -d '{"model":"qwen3.5:122B"}' | jq '.capabilities'
+["completion","vision","tools","thinking"]
+```
+
+`tools` in that list is the one that matters: an agent whose model cannot call
+tools is a chatbot. The same call reports a 262144-token context; the config
+below asks for 131072, because the KV cache for the full window on a 122B model
+is itself larger than anything in this cluster.
+
+If you want the model in-cluster instead, `qwen3:8b` is 5.2 GB and fits — every
+trap below still applies, because they are about DNS and egress, not model size.
 
 `ollama-endpoint.yaml` is a Service with **no selector** plus a hand-written
 `EndpointSlice` carrying the LAN address. That keeps the address out of
