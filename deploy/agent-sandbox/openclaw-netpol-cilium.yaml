@@ -1,0 +1,61 @@
+# The narrow allow rule that quietly opened the whole model host
+# ============================================================================
+# OPTIONAL on paper, NOT optional here. Apply this if your CNI is Cilium — which
+# it is on the cluster this episode is built on.
+#
+# openclaw-netpol.yaml allows egress to exactly `10.0.0.189/32` on exactly port
+# `11434`. Read as written, that is airtight. Measured from a live pooled
+# sandbox with only that policy applied:
+#
+#   10.0.0.189:22     -> OPEN            <-- SSH on the model host. To a sandbox
+#                                            whose entire job is running code
+#                                            somebody else wrote.
+#   10.0.0.189:11435  -> ECONNREFUSED    <-- reached the host, port simply shut
+#   10.0.0.230:22     -> timeout         <-- control-plane, still blocked
+#   10.0.0.232:22     -> timeout         <-- worker, still blocked
+#
+# Only the address we named opened up, and it opened on EVERY port. The
+# controller-generated policy says `0.0.0.0/0 except 10.0.0.0/8`; naming
+# 10.0.0.189/32 in a second policy gives Cilium a distinct identity for that
+# address, and the broad rule then matches it — the `except` no longer covers
+# it. Our port restriction only ever constrained OUR rule; it cannot constrain
+# the other policy's.
+#
+# The general shape is worth internalising: under Kubernetes NetworkPolicy,
+# allows UNION and there is no way to say "and nothing else". Adding a rule can
+# only ever widen. So the thing you must check after writing a narrow allow is
+# not whether the traffic you wanted works — it will — but whether anything
+# ELSE just became reachable. `nc -z <host> 22` from inside the sandbox is a
+# five-second test that would have caught this.
+#
+# Cilium's `egressDeny` is the missing "and nothing else": deny beats allow
+# regardless of policy order or which policy granted it. Expressed as the two
+# port ranges either side of 11434, because a deny with no ports would take the
+# model backend down with it.
+#
+# Portable alternative if you are not on Cilium: put Ollama on a host that runs
+# nothing else you would mind a sandbox reaching, and treat "named in an ipBlock"
+# as meaning "fully exposed to the sandbox". That is an architecture decision,
+# not a policy one.
+# ============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openclaw-confine-model-host
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      app: openclaw
+  egressDeny:
+    - toCIDR:
+        # Keep in sync with ollama-endpoint.yaml and openclaw-netpol.yaml.
+        - "10.0.0.189/32"
+      toPorts:
+        - ports:
+            - port: "1"
+              endPort: 11433
+              protocol: TCP
+            - port: "11435"
+              endPort: 65535
+              protocol: TCP

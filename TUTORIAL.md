@@ -418,6 +418,201 @@ entry to that claim and it cold-starts instead (§9a).
 
 ---
 
+## Step 7b — A self-hosted model, and reaching the WebUI
+
+Up to here the agent has had a placeholder provider key. Two things change when
+you point it at a real, self-hosted backend and put its WebUI on a screen: the
+model moves off a hosted API onto Ollama, and the gateway has to be reachable
+from a browser outside the cluster. Neither is hard. Both are blocked by
+defaults that fail *quietly*, and all four traps below were found by running
+this, not by reading it.
+
+```bash
+kubectl apply -f deploy/agent-sandbox/ollama-endpoint.yaml     # where the model lives
+kubectl apply -f deploy/agent-sandbox/openclaw-netpol.yaml     # traps 1 + 2
+kubectl apply -f deploy/agent-sandbox/openclaw-netpol-cilium.yaml  # trap 3 (Cilium)
+kubectl apply -f deploy/agent-sandbox/openclaw-ui-service.yaml # the WebUI
+```
+
+### First, does the model even fit?
+
+Check before you write any YAML, because the answer is usually no:
+
+```console
+$ kubectl get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory
+control-plane   4   3.7Gi
+worker-1        4   11.6Gi
+worker-2        4   11.6Gi
+```
+
+A 32B model at q4 is ~20 GB of weights (`qwen3:32b` is 20.2 GB from the Ollama
+registry — check with `curl -s https://registry.ollama.ai/v2/library/qwen3/manifests/32b`).
+It does not fit in 11.6 GiB at any quantisation, there is no GPU, and on CPU it
+would answer at roughly 1–2 tokens/second even if it did. So Ollama runs on a
+host with the RAM for it and the sandbox reaches it over the LAN. If you want
+the model in-cluster instead, `qwen3:8b` is 5.2 GB and fits — every trap below
+still applies, because they are about DNS and egress, not about model size.
+
+`ollama-endpoint.yaml` is a Service with **no selector** plus a hand-written
+`EndpointSlice` carrying the LAN address. That keeps the address out of
+`openclaw.json`: the config names `ollama.default.svc.cluster.local`, and moving
+the model host is an EndpointSlice edit rather than a config change that would
+recycle every pooled sandbox.
+
+### Trap 1 — the sandbox does not use cluster DNS
+
+A template-derived sandbox is born with public resolvers and no cluster DNS:
+
+```console
+$ kubectl get pod openclaw-pool-xxxxx -o jsonpath='{.spec.dnsPolicy}{.spec.dnsConfig}'
+None{"nameservers":["8.8.8.8","1.1.1.1"]}
+```
+
+So every in-cluster Service name is `ENOTFOUND` from inside the sandbox —
+including the one its model backend lives at. A bare `Sandbox` like `demo-agent`
+gets `dnsPolicy: ClusterFirst` and resolves perfectly, which is exactly why this
+survives testing: **it works on the single sandbox and breaks when you move to
+the pool.** Set it explicitly in the template:
+
+```yaml
+spec:
+  podTemplate:
+    spec:
+      dnsPolicy: ClusterFirst
+```
+
+### Trap 2 — the generated NetworkPolicy blocks your own network
+
+A `SandboxTemplate` makes the controller write a NetworkPolicy for you. Read it:
+
+```yaml
+egress:
+- to:
+  - ipBlock:
+      cidr: 0.0.0.0/0
+      except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+```
+
+"The internet, yes; anything private, no" — a defensible default for untrusted
+code, and it takes out *both* halves of a self-hosted backend at once, because
+kube-dns (10.96.0.10) and a LAN Ollama (10.0.0.x) are both RFC1918. Measured
+from a live pool member: DNS `ENOTFOUND`, `connect 10.0.0.230:6443` timeout.
+The same rule blocks the WebUI, from the other direction — ingress is admitted
+only from the in-cluster `sandbox-router`, so a LoadBalancer reaches the pod and
+the packet is dropped and the browser simply hangs.
+
+You cannot edit the generated policy; the controller owns it and reverts you.
+NetworkPolicy allows are additive, so `openclaw-netpol.yaml` unions the holes
+back in: DNS, the model backend on one `/32` and one port, and `:18789` from the
+LAN. Note what it selects on — `app: openclaw`, a label we set ourselves in
+`podTemplate.metadata` — and **not**
+`agents.x-k8s.io/sandbox-template-ref-hash`. That hash is derived from the
+template's contents, so keying a policy to it means the policy silently stops
+matching anything the next time you edit the template.
+
+What the agent sees when this is wrong is the worst part: the model call hangs
+until it times out, so on camera you get an agent that thinks forever, not an
+error.
+
+### Trap 3 — the narrow allow rule that opened the whole host ⚠️
+
+`openclaw-netpol.yaml` allows `10.0.0.189/32` on port `11434` and nothing else.
+Read as written that is airtight. Measured from inside the sandbox with only
+that policy applied:
+
+| target | result |
+|---|---|
+| `10.0.0.189:11434` | open — the model backend, as intended |
+| `10.0.0.189:22` | **open** — SSH on the model host |
+| `10.0.0.189:11435` | `ECONNREFUSED` — host reached, port simply shut |
+| `10.0.0.230:22` (control-plane) | timeout — still blocked |
+| `10.0.0.232:22` (worker) | timeout — still blocked |
+
+Only the address we named opened up, and it opened on **every port**, to a
+sandbox whose entire purpose is running code somebody else wrote. Naming
+`10.0.0.189/32` gives Cilium a distinct identity for that address, which the
+other policy's `0.0.0.0/0` rule then matches — the `except` stops covering it.
+Our port restriction only ever constrained *our* rule.
+
+The general shape is worth keeping: under Kubernetes NetworkPolicy, allows
+union and there is no way to say "and nothing else", so adding a rule can only
+widen. **After writing a narrow allow, do not check that the traffic you wanted
+works — it will. Check what else just became reachable.** `nc -z <host> 22` from
+inside the sandbox is a five-second test that catches this.
+
+Cilium's `egressDeny` is the missing "and nothing else" (deny beats allow) and
+is what `openclaw-netpol-cilium.yaml` applies, as the two port ranges either
+side of 11434. Not on Cilium? Then put Ollama on a host that runs nothing you
+would mind a sandbox reaching, and treat "named in an `ipBlock`" as "fully
+exposed" — an architecture decision rather than a policy one.
+
+### Trap 4 — the WebUI loads and then cannot log in
+
+The controller's `service: true` Service cannot be used for this:
+
+```console
+$ kubectl get svc demo-agent
+NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+demo-agent   ClusterIP   None         <none>        <none>    102m
+```
+
+Headless, no ports — it exists so an in-cluster router can resolve the pod, and
+there is no field on the `Sandbox` to promote it. So you add your own Service,
+and `kubectl port-forward` is not a fallback because the gVisor sandbox does not
+support it. The selector needs care too: the controller stamps only
+`agents.x-k8s.io/sandbox-name-hash=<opaque>`, so there is no readable
+`sandbox-name` label to match. `demo-sandbox.yaml` sets `app: openclaw` /
+`role: ui` in `podTemplate.metadata` — which the controller does propagate to
+the pod — and the Service selects those.
+
+Then the last trap, which only appears in a browser and never in `curl`. Since
+v2026.2.26 OpenClaw refuses Control-UI authentication from any origin not in
+`gateway.controlUi.allowedOrigins`, and on a non-loopback bind it seeds that
+list with localhost only. You will find this in the gateway log:
+
+```
+[gateway] seeded gateway.controlUi.allowedOrigins ["http://localhost:18789",
+"http://127.0.0.1:18789"] for bind=lan (required since v2026.2.26)
+```
+
+The page loads, looks perfect and cannot authenticate. Add the real origin:
+
+```json
+"gateway": {
+  "bind": "lan",
+  "auth": { "mode": "token" },
+  "controlUi": { "allowedOrigins": ["http://10.0.0.241:18789"] }
+}
+```
+
+**That makes the LoadBalancer address part of the agent's configuration**, so
+pin it (`spec.loadBalancerIP`) rather than letting MetalLB auto-assign — a
+cluster rebuild that hands you `.242` breaks the login with no error that points
+at the cause.
+
+### Before you leave it running
+
+This publishes an agent that executes code onto your LAN. The gateway binds
+non-loopback, which makes token auth mandatory; verify it is actually enforced
+rather than assuming:
+
+```console
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://10.0.0.241:18789/tools/invoke \
+    -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"id"}}'
+401
+```
+
+401 is the answer you want. The SPA shell, `/health` and `/status` are public by
+design and return 200 unauthenticated — that is the UI bootstrapping itself, not
+a hole; `/tools/invoke` and `/api/channels/*` are the surfaces that matter, and
+they are fail-closed. A 200 from `/tools/invoke` means anyone on the LAN owns
+the sandbox.
+
+Keep the token off camera: paste it off-recording or pre-authenticate the tab
+before you hit record.
+
+---
+
 ## Step 8 — The OpenTelemetry Collectors
 
 Two Collectors, because one shape cannot do both jobs.

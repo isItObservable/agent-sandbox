@@ -1,0 +1,58 @@
+# Reaching the OpenClaw WebUI from a browser outside the cluster
+# ============================================================================
+# The Sandbox controller's own `service: true` Service CANNOT be used for this.
+# Verified live:
+#
+#   $ kubectl get svc demo-agent
+#   NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+#   demo-agent   ClusterIP   None         <none>        <none>    102m
+#
+# It is headless and declares no ports — it exists so an in-cluster router can
+# resolve the pod, not so a human can open it. There is no field on the Sandbox
+# to make it a LoadBalancer. You add your own Service, and `kubectl port-forward`
+# is not a fallback here (the gVisor sandbox does not support it).
+#
+# SELECTOR: the controller only stamps `agents.x-k8s.io/sandbox-name-hash`,
+# an opaque hash — there is no `sandbox-name: demo-agent` label to select on.
+# Selecting on the hash would work but is unreadable and undocumented API.
+# Instead `demo-sandbox.yaml` sets its own labels via `podTemplate.metadata`,
+# which the controller propagates to the pod (verified live), and we select
+# those.
+#
+# SECURITY: this publishes an agent that executes arbitrary code onto the LAN.
+# The gateway binds non-loopback, which makes OpenClaw's token auth mandatory
+# (`auth.mode: token` in openclaw.json + OPENCLAW_GATEWAY_TOKEN from the
+# Secret). Confirm it is actually enforced before you leave this running:
+#
+#   curl -s -o /dev/null -w '%{http_code}\n' http://<EXTERNAL-IP>:18789/   # 401
+#
+# A 200 there means the token is not wired and anyone on the LAN owns the
+# sandbox. Never put the token itself on screen: paste it into the browser
+# off-camera, or pre-authenticate the tab before recording.
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw-ui
+  namespace: default
+  labels:
+    app: openclaw
+spec:
+  type: LoadBalancer
+  # THE ADDRESS IS PINNED, and it is not cosmetic. OpenClaw's Control UI refuses
+  # to authenticate from any browser origin not listed in
+  # `gateway.controlUi.allowedOrigins`, and that list lives in openclaw.json --
+  # i.e. the LoadBalancer IP is baked into the agent's config. Let MetalLB
+  # auto-assign and a cluster rebuild hands you .242, the origin check fails,
+  # and the UI loads but cannot log in. Keep this in sync with the
+  # `allowedOrigins` entry in demo-sandbox.yaml's ConfigMap.
+  loadBalancerIP: 10.0.0.241
+  externalTrafficPolicy: Local
+  selector:
+    app: openclaw
+    role: ui
+  ports:
+    - name: gateway
+      port: 18789
+      targetPort: 18789
+      protocol: TCP

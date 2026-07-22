@@ -1,0 +1,93 @@
+# The trap that silently kills a self-hosted model backend
+# ============================================================================
+# A `SandboxTemplate` makes the controller generate a NetworkPolicy for you.
+# Read what it actually says (`kubectl get netpol openclaw-tpl-network-policy -o yaml`):
+#
+#   egress:
+#   - to:
+#     - ipBlock:
+#         cidr: 0.0.0.0/0
+#         except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+#   ingress:
+#   - from:
+#     - namespaceSelector: {kubernetes.io/metadata.name: agent-sandbox-system}
+#       podSelector: {app: sandbox-router}
+#
+# That is "the internet, yes; anything private, no". It is a sane default for a
+# sandbox running untrusted code, and it breaks a self-hosted model in two ways
+# that are easy to misdiagnose, because BOTH of them are RFC1918:
+#
+#   1. kube-dns is 10.96.0.10 -> inside the 10.0.0.0/8 exception. DNS DOES NOT
+#      RESOLVE AT ALL from a pooled sandbox. Measured from a live pool member:
+#        dns.lookup("kubernetes.default.svc.cluster.local") -> ENOTFOUND
+#      versus the same lookup from `demo-agent` -> 10.96.0.1.
+#   2. A LAN Ollama at 10.0.0.x is inside the same exception. Measured:
+#        connect 10.0.0.230:6443 -> TIMEOUT
+#
+# THE PART THAT MAKES IT A TRAP RATHER THAN A BUG: `demo-agent` is a bare
+# `Sandbox`, not template-derived, so NO policy selects it and everything works.
+# You wire Ollama, test it against demo-agent, see it answer, then move to the
+# warm pool for the real demo — and the agent goes silent at exactly the moment
+# you stop watching. The failure is a timeout inside the agent's model call, so
+# what you see on camera is an agent that "thinks" forever, not an error.
+#
+# Kubernetes NetworkPolicies are additive for ALLOW, so this file unions the two
+# holes back in without touching the controller-generated policy (which you
+# could not keep edited anyway — the controller owns it and reverts changes).
+#
+# The narrow alternative to "poke a hole": run Ollama in-cluster with a small
+# model. That still needs the DNS rule below. There is no configuration in which
+# you can leave the generated policy entirely alone.
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-allow-model-backend
+  namespace: default
+spec:
+  # Selects on the label WE set in the template's podTemplate.metadata, not on
+  # `agents.x-k8s.io/sandbox-template-ref-hash`. That hash is derived from the
+  # template's contents, so it changes the next time you edit the template and
+  # a policy keyed to it would silently stop matching anything.
+  podSelector:
+    matchLabels:
+      app: openclaw
+  policyTypes:
+    - Egress
+    - Ingress
+  egress:
+    # Hole 1: DNS. Without this the sandbox cannot resolve its own cluster,
+    # let alone `ollama.default.svc.cluster.local`.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Hole 2: the model backend, and ONLY the model backend. A single /32 on a
+    # single port — not the whole 10.0.0.0/8, which would hand a code-executing
+    # sandbox your entire LAN and undo the reason the default policy exists.
+    # Keep this address in sync with ollama-endpoint.yaml.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.189/32
+      ports:
+        - protocol: TCP
+          port: 11434
+  ingress:
+    # The WebUI. The generated policy admits only the in-cluster sandbox-router,
+    # so a LoadBalancer Service reaches the pod and the packet is dropped — the
+    # browser just hangs. `externalTrafficPolicy: Local` on that Service keeps
+    # the real client IP, so this rule can name the LAN instead of 0.0.0.0/0.
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/24
+      ports:
+        - protocol: TCP
+          port: 18789

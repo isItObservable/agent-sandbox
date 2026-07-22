@@ -21,7 +21,21 @@ metadata:
 spec:
   envVarsInjectionPolicy: Allowed
   podTemplate:
+    metadata:
+      # `app: openclaw` is the stable handle the egress policy selects on. Do
+      # NOT select pooled pods by `sandbox-template-ref-hash`: that hash changes
+      # every time the template changes, silently orphaning the policy.
+      labels:
+        app: openclaw
     spec:
+      # THE SECOND HALF OF THE MODEL-BACKEND TRAP. A template-derived sandbox is
+      # born with `dnsPolicy: None` and `nameservers: [8.8.8.8, 1.1.1.1]` --
+      # public resolvers only, cluster DNS not in the list. So EVERY in-cluster
+      # Service name is NXDOMAIN from a pooled sandbox, including the one this
+      # agent needs for its model backend. A bare `Sandbox` gets ClusterFirst and
+      # resolves fine, which is why this only breaks after you move to the pool.
+      # Verified: `ollama.default.svc.cluster.local` -> ENOTFOUND without this line.
+      dnsPolicy: ClusterFirst
       runtimeClassName: gvisor
       containers:
         - name: agent
@@ -41,11 +55,16 @@ spec:
                 secretKeyRef:
                   name: openclaw-secrets
                   key: OPENCLAW_GATEWAY_TOKEN
-            - name: ANTHROPIC_API_KEY
+            # Ollama over the LAN. "ollama-local" is OpenClaw's marker for an
+            # unauthenticated local/LAN daemon -- it is not a credential. The
+            # real endpoint lives in ollama-endpoint.yaml, so repointing the
+            # model backend never touches this ConfigMap and never restarts
+            # the warm pool.
+            - name: OLLAMA_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: openclaw-secrets
-                  key: ANTHROPIC_API_KEY
+                  key: OLLAMA_API_KEY
           volumeMounts:
             - name: config
               mountPath: /etc/openclaw
