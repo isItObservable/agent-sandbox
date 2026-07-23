@@ -121,8 +121,21 @@ Computed from `SandboxClaim.metadata.creationTimestamp` → `status.conditions[R
 | `claim-warm` (cold) | 09:02:33 | 09:02:39 | **+6 s** |
 | `claim-noenv` (**warm**) | 09:03:40 | 09:01:24 | **−136 s** |
 
+Re-measured against the real OpenClaw image (`openclaw-pool`, same method):
+
+| Claim | Created | Ready | Δ |
+|---|---|---|---|
+| `oc-claim-env` (cold) | 13:37:22 | 13:37:28 | **+6 s** |
+| `oc-claim-warm` (**warm**) | 13:37:22 | 13:35:56 | **−86 s** |
+
 A **negative** time-to-ready is the cleanest possible proof of a warm-pool hit: the sandbox
-was Ready more than two minutes *before the claim that got it existed*. Great on camera.
+was Ready *before the claim that got it existed*. Great on camera.
+
+**Two caveats, so the numbers are not over-read.** The *magnitude* of the negative value is
+just how long that member happened to idle before a claim arrived — it varies run to run, so
+**the sign is the finding, not the size**. And `+6 s` is a warm-*image* cold start: the node
+already had the 324 MB OpenClaw image. First pull on a fresh node put the same cold path at
+**~2.5 minutes**, which is the larger share of what a pool actually buys.
 
 ---
 
@@ -235,27 +248,51 @@ workload is *not* on the host kernel.
   sandboxed pod from a normal one.** Join via the Sandbox CR watch stream (§5), or stamp a
   pod label in the SandboxTemplate and extract it with `k8sattributes`.
 
-### ⚠️ The trap: `/proc` inside gVisor lies about scale
+### ⚠️ The trap: `/proc` inside gVisor is only as honest as your limits
 
-Executed inside a gVisor-sandboxed pod with a 256 Mi limit:
+gVisor synthesises `/proc` rather than passing the host's through. What lands there
+depends entirely on whether a memory limit is set:
 
 ```
 $ cat /proc/version
 Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
-$ head -3 /proc/meminfo
-MemTotal:       12248276 kB      <-- the HOST's 12 GiB, not the pod's 256 Mi
-MemFree:        12243312 kB
+
+# pod WITH limits.memory: 256Mi
+$ head -1 /proc/meminfo
+MemTotal:         262144 kB      <-- exactly the limit. Correct.
+
+# same image, NO memory limit
+$ head -1 /proc/meminfo
+MemTotal:       12248276 kB      <-- the HOST's 12 GiB
 ```
 
-**Any agent that self-reports resource usage by reading `/proc` will report host-scale
-numbers.** Python's `psutil`, Node's `os.totalmem()`, JVM ergonomics, and most
-"how much memory do I have" logic are all wrong inside a sandbox. Worse, a runtime that
-sizes its heap from `MemTotal` will size for 12 GiB inside a 256 Mi container and get
-OOM-killed.
+**Set a limit and gVisor tells the truth; omit one and every "how much memory do I have"
+call reports the whole node.** CPU behaves the same way — `nproc` returns the
+limit-derived count when set, the host core count when not.
 
-**→ Always take sandbox resource telemetry from `kubeletstats` (outside), never from the
-agent's self-report (inside).** This is the single best "why observability is different in a
-sandbox" teaching moment in the episode.
+Measured with the real OpenClaw image (Node.js 24), same node, only the limit differing:
+
+| | `limits.memory: 1Gi` | no limit |
+|---|---|---|
+| `os.totalmem()` | 1 GiB | **11.68 GiB** |
+| V8 heap limit | 560 MB | **2240 MB** |
+| `os.cpus().length` | 2 | 4 |
+
+Python's `psutil`, JVM ergonomics and Go's `GOMAXPROCS` read the same synthetic files and
+reach the same conclusion. An unlimited sandbox lets a Node agent grow a 2.2 GB heap on a
+node shared with every other tenant's agents.
+
+**→ Two rules.** (1) **Always set `requests` *and* `limits` on sandbox containers** — under
+gVisor the limit is not just a cgroup ceiling, it is the only thing that makes `/proc`
+honest. (2) **Always take sandbox resource telemetry from `kubeletstats` (outside), never
+from the agent's self-report (inside)** — even with limits set, self-reporting means
+trusting the workload to report on itself.
+
+> **Correction.** An earlier revision of this document claimed `MemTotal` always reports the
+> host's 12 GiB, citing a 256 Mi sandbox. That reading came from a pod with **no memory
+> limit** and the conclusion was over-generalised. Re-measured on the same cluster: a
+> 256 Mi-limited gVisor pod reports exactly `262144 kB`. The trap is real; the cause is the
+> missing limit.
 
 ---
 

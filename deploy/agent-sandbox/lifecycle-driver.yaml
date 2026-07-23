@@ -22,7 +22,7 @@ metadata:
   name: demo-tpl
   namespace: default
   labels:
-    episode: isi1798
+    app: lifecycle-demo
 spec:
   envVarsInjectionPolicy: Allowed
   podTemplate:
@@ -52,7 +52,7 @@ metadata:
   name: demo-pool
   namespace: default
   labels:
-    episode: isi1798
+    app: lifecycle-demo
 spec:
   replicas: 2
   sandboxTemplateRef:
@@ -66,7 +66,7 @@ metadata:
   name: claim-a
   namespace: default
   labels:
-    episode: isi1798
+    app: lifecycle-demo
 spec:
   warmPoolRef:
     name: demo-pool
@@ -80,7 +80,7 @@ metadata:
   name: claim-b
   namespace: default
   labels:
-    episode: isi1798
+    app: lifecycle-demo
 spec:
   warmPoolRef:
     name: demo-pool
@@ -95,7 +95,7 @@ metadata:
   name: ttl-victim
   namespace: default
   labels:
-    episode: isi1798
+    app: lifecycle-demo
 spec:
   operatingMode: Running
   shutdownPolicy: Delete

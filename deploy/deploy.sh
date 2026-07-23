@@ -21,8 +21,14 @@ set -euo pipefail
 : "${DT_OPERATOR_TOKEN:?set DT_OPERATOR_TOKEN (Dynatrace API token)}"
 : "${DT_INGEST_TOKEN:?set DT_INGEST_TOKEN (data-ingest token)}"
 
+# OpenClaw needs at least one model-provider key. The gateway binds to a
+# non-loopback address (so the Sandbox Service can reach it), which makes token
+# auth mandatory.
+: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY (or edit deploy.sh for GEMINI/OPENAI/OPENROUTER)}"
+OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=')}"
+
 AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.2}"
-OTEL_OPERATOR_VERSION="${OTEL_OPERATOR_VERSION:-0.156.0}"
+OTEL_OPERATOR_VERSION="${OTEL_OPERATOR_VERSION:-0.120.0}"  # chart version; app version is 0.156.0
 DT_OPERATOR_VERSION="${DT_OPERATOR_VERSION:-1.9.0}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,8 +85,16 @@ for f in "${HERE}/collectors/otel-gateway.yaml" "${HERE}/collectors/otel-node-ag
 done
 
 # --- 6. Demo sandbox ---------------------------------------------------------
-say "Demo agent Sandbox (gVisor)"
+say "Demo agent Sandbox (OpenClaw under gVisor)"
+kubectl create secret generic openclaw-secrets -n default \
+  --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+  --from-literal=OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f "${HERE}/agent-sandbox/demo-sandbox.yaml"
+
+# First pull of ghcr.io/openclaw/openclaw:slim is ~324 MB — allow a few minutes
+# on a node that has never seen it.
+kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m || true
 
 say "Done. Next: kubectl get sandbox,sandboxclaim,sandboxwarmpool -A"
 echo "    Drive the full lifecycle:  kubectl apply -f ${HERE}/agent-sandbox/lifecycle-driver.yaml"

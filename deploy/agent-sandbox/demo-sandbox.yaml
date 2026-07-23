@@ -1,17 +1,46 @@
-# agent-sandbox-demo — demo agent Sandbox running under gVisor
+# agent-sandbox demo — a real OpenClaw agent Sandbox running under gVisor
 # ============================================================================
-# Proves issue acceptance #4 end-to-end: an agent-sandbox `Sandbox` whose pod is
-# scheduled with `runtimeClassName: gvisor`, i.e. the agent workload executes
-# inside the gVisor userspace kernel rather than sharing the host kernel.
+# Proves the episode's core claim end to end: a real agent runtime (OpenClaw,
+# a Node.js gateway) executing inside the gVisor userspace kernel rather than
+# sharing the host kernel.
 #
 # API: agents.x-k8s.io/v1beta1 (agent-sandbox v0.5.2).
-# `service: true` makes the controller front the sandbox pod with a Service so a
-# router / client SDK can reach the agent.
+# `service: true` makes the controller front the sandbox pod with a headless
+# Service so a router / client SDK can reach the agent on :18789.
 #
-# The demo agent image is intentionally a small, always-pullable stand-in. Swap
-# `image:` for the real openclaw / aider agent image once the episode repo
-# (isItObservable/agent-sandbox) publishes one — nothing else here changes.
+# Config lives in the ConfigMap and credentials in the Secret so that this same
+# pod spec can be lifted verbatim into a SandboxTemplate — which is what makes
+# warm-pool adoption possible (see TUTORIAL.md §9a). Do NOT move these into a
+# per-claim `spec.env`: that silently drops warm-pool hit rate to 0%.
 # ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config
+  namespace: default
+  labels:
+    app: demo-agent
+data:
+  # bind: "lan" is required for the Service to reach the gateway. OpenClaw
+  # defaults to loopback-only, which works with `kubectl port-forward` and
+  # nothing else. A non-loopback bind REQUIRES auth to be configured.
+  openclaw.json: |
+    {
+      "gateway": {
+        "mode": "local",
+        "bind": "lan",
+        "port": 18789,
+        "auth": { "mode": "token" }
+      },
+      "agents": {
+        "defaults": { "workspace": "/workspace/agent" }
+      }
+    }
+  AGENTS.md: |
+    # Demo agent
+    You are a demo agent running inside a gVisor-isolated Kubernetes sandbox.
+    Keep answers short.
+---
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
@@ -19,7 +48,6 @@ metadata:
   namespace: default
   labels:
     app: demo-agent
-    episode: isi1798
 spec:
   operatingMode: Running
   # Retain so the sandbox survives for telemetry capture.
@@ -31,21 +59,63 @@ spec:
       runtimeClassName: gvisor
       containers:
         - name: agent
-          image: busybox:1.36
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              echo "[demo-agent] booted inside sandbox on $(hostname)"
-              # Prove to the log (and to anyone exec-ing in) that this really is
-              # the gVisor kernel, not the host kernel.
-              dmesg | head -3
-              uname -a
-              echo "[demo-agent] idling; ready for telemetry capture"
-              sleep infinity
+          image: ghcr.io/openclaw/openclaw:slim
+          ports:
+            - name: gateway
+              containerPort: 18789
+          env:
+            # The image's default HOME is /home/node, which is on the read-only
+            # image layer. Point HOME and the state dir at the writable volume.
+            - name: HOME
+              value: /workspace
+            - name: OPENCLAW_CONFIG_PATH
+              value: /etc/openclaw/openclaw.json
+            - name: OPENCLAW_STATE_DIR
+              value: /workspace/state
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: OPENCLAW_GATEWAY_TOKEN
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: ANTHROPIC_API_KEY
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openclaw
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+          # WITHOUT this probe the Sandbox reports Ready ~14s before OpenClaw can
+          # actually serve a request (pod-ready 8s vs gateway-ready 22s, measured).
+          # A warm pool would hand out members that are not yet serving.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 18789
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 200m
+              memory: 512Mi
+            # ALWAYS set a memory limit under gVisor. With no limit, /proc/meminfo
+            # inside the sandbox reports the HOST's memory and Node sizes its heap
+            # for a machine it does not have (measured: 11.68 GiB / 2240 MB heap,
+            # versus 1 GiB / 560 MB with this limit in place). See TUTORIAL.md §9b.
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: openclaw-config
+        - name: workspace
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

@@ -87,8 +87,11 @@ with immutable node images — unless they offer gVisor natively.
 | GKE | Use a **gVisor-enabled node pool** and **skip Step 3** entirely. |
 | kind / minikube | Works for Steps 2, 4–12, but gVisor needs `runsc` in the node image. Without it, drop `runtimeClassName` from the manifests and you lose the isolation story. |
 
-Any recent Kubernetes with a CNI and a default StorageClass is fine. This episode
-was built on a 1 control-plane + 2 worker cluster; nothing here needs more.
+Any recent Kubernetes with a CNI is fine. This episode was built on a
+1 control-plane + 2 worker cluster; nothing here needs more.
+
+**No StorageClass required.** Every manifest here uses `emptyDir` for agent
+state, deliberately — see the warm-pool/persistence trade-off in Step 7.
 
 ---
 
@@ -103,7 +106,7 @@ helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm
 helm repo update
 helm upgrade --install opentelemetry-operator open-telemetry/opentelemetry-operator \
   -n opentelemetry-operator-system --create-namespace \
-  --version 0.156.0 \
+  --version 0.120.0 \
   --set "manager.image.repository=ghcr.io/open-telemetry/opentelemetry-operator/opentelemetry-operator" \
   --set admissionWebhooks.certManager.enabled=false \
   --set admissionWebhooks.autoGenerateCert.enabled=true \
@@ -221,12 +224,24 @@ dashboard tile — a failing conversion webhook breaks every API call to the CRD
 
 ## Step 6 — Your first Sandbox, and proving the boundary
 
+The demo agent is **OpenClaw** (`ghcr.io/openclaw/openclaw:slim`) — a real Node.js
+agent gateway, not a sleep-forever placeholder. It needs one model-provider key
+and a gateway token:
+
 ```bash
+kubectl create secret generic openclaw-secrets -n default \
+  --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+  --from-literal=OPENCLAW_GATEWAY_TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+
 kubectl apply -f deploy/agent-sandbox/demo-sandbox.yaml
-kubectl get sandbox demo-agent -o wide
+kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m
 ```
 
-The manifest is deliberately small — the point is the two fields that matter:
+> The first pull is **~324 MB**, so on a node that has never seen the image
+> expect **~2.5 minutes** before the pod even starts. That number is the whole
+> economic argument for the warm pool in Step 7 — keep it in mind.
+
+The manifest is deliberately small — the point is the fields that matter:
 
 ```yaml
 apiVersion: agents.x-k8s.io/v1beta1
@@ -242,9 +257,20 @@ spec:
       runtimeClassName: gvisor  # ← THE POINT
       containers:
         - name: agent
-          image: busybox:1.36
+          image: ghcr.io/openclaw/openclaw:slim
           # ...
 ```
+
+Three things in that file are not obvious, and each one is a bug if you skip it:
+
+- **`bind: "lan"` in `openclaw.json`.** OpenClaw binds to loopback by default,
+  which works with `kubectl port-forward` and nothing else. Without this the
+  Service resolves and then refuses every connection. A non-loopback bind also
+  makes gateway auth mandatory — hence the token.
+- **`HOME=/workspace`.** The image's default `HOME` is `/home/node`, on the
+  read-only image layer. Point `HOME` and `OPENCLAW_STATE_DIR` at a writable
+  volume or the gateway cannot persist anything.
+- **A `readinessProbe` on `:18789`.** Covered below — it is not cosmetic.
 
 The controller creates one Pod and one headless Service, and reports back on
 `status`: `serviceFQDN`, `service`, `podIPs`, `nodeName`, `conditions`.
@@ -256,21 +282,63 @@ actual `Sandbox`:
 kubectl get pod demo-agent -o jsonpath='{.spec.runtimeClassName}'; echo
 # gvisor
 
-kubectl logs demo-agent -c agent
-# [demo-agent] booted inside sandbox on demo-agent
-# [    0.000000] Starting gVisor...
-# Linux demo-agent 4.19.0-gvisor #1 SMP ... x86_64 GNU/Linux
+kubectl exec demo-agent -c agent -- uname -a
+# Linux demo-agent 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016 x86_64 GNU/Linux
 ```
 
 **`4.19.0-gvisor`** is the whole story in one string. That is not your node's
-kernel version — it is gVisor's synthetic guest kernel identifying itself. The
-agent is not on the host kernel.
+kernel version — it is gVisor's synthetic guest kernel identifying itself. A
+full Node.js 24 runtime, 7 OpenClaw plugins and a Playwright-capable image are
+all running on it. The agent is not on the host kernel.
+
+Confirm the gateway is actually serving, from another pod, through the Service:
+
+```bash
+kubectl run reach --image=busybox:1.36 --restart=Never --rm -it -- \
+  wget -S -O- http://demo-agent.default.svc.cluster.local:18789/
+# HTTP/1.1 200 OK
+```
+
+### The readiness lie ⚠️
+
+`Sandbox` reports `Ready` when the **pod** is ready. With no probe, the pod is
+"ready" the moment the container process starts — but OpenClaw needs to load
+config, resolve auth, start its HTTP server and pre-warm its provider auth and
+plugin runtime before it can answer anything. Measured on this cluster:
+
+| Event | Without a readiness probe |
+|---|---|
+| pod Ready / `Sandbox` Ready | **8 s** |
+| OpenClaw actually serving | **22 s** |
+
+That is a **14-second window where the platform advertises an agent that will
+refuse your request** — and it is worse than it looks, because a `SandboxWarmPool`
+counts the same condition. A pool can hand a claim a member that is not serving.
+
+The fix is one block, already in `demo-sandbox.yaml`:
+
+```yaml
+readinessProbe:
+  httpGet: { path: /, port: 18789 }
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 30
+```
+
+With it, `Sandbox` Ready lands at **24 s** — slower on paper, honest in practice.
+**Put a real readiness probe on every agent image you pool.** A `Ready` condition
+you cannot trust is worse than no condition at all.
 
 > **Access note:** with gVisor or Kata, direct `kubectl port-forward` to the
 > sandbox pod is **not supported**. Upstream ships a **Sandbox Router** — a
 > reverse proxy that routes on an `X-Sandbox-ID` header — and the Python SDK uses
 > it. If you expose sandboxes to users, the router becomes a production
 > dependency, so monitor it like one.
+
+> **Benign log line:** OpenClaw logs `failed to promote config last-known-good
+> backup: EROFS` because `openclaw.json` is mounted from a read-only ConfigMap.
+> That is the correct trade — config stays declarative — and the gateway still
+> reaches `ready`.
 
 ---
 
@@ -307,6 +375,46 @@ kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller | grep -i a
 
 That second line is a **warm-pool hit**. Hold onto it — Step 9 is about the case
 where you never see it.
+
+### Pooling a *real* agent image
+
+The lifecycle driver uses a tiny image so the state space is quick to exercise.
+Pooling OpenClaw works identically, with one rule that decides whether the pool
+functions at all:
+
+```bash
+kubectl apply -f deploy/agent-sandbox/openclaw-pool.yaml
+```
+
+**Everything the agent needs to be born configured goes in the `SandboxTemplate`.**
+The secret ref, the ConfigMap mount and the workspace volume all belong in
+`spec.podTemplate` — exactly the same block as `demo-sandbox.yaml`. Then a claim
+is empty:
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: oc-claim-warm
+spec:
+  warmPoolRef:
+    name: openclaw-pool     # and nothing else
+```
+
+Verified on this cluster: an empty claim against an OpenClaw pool adopts a warm
+member that is already a fully booted, serving gateway. Add a single `spec.env`
+entry to that claim and it cold-starts instead (§9a).
+
+> **The persistence trade-off, stated plainly.** OpenClaw's own install guide
+> gives each instance a 10 Gi PVC. You cannot have that *and* a warm pool: a PVC
+> named in the template is one volume shared by every pooled member (and RWO
+> means they will not even schedule together), while a per-claim
+> `volumeClaimTemplates` bypasses the pool exactly like `spec.env` does. So:
+> **pooled agents get ephemeral `emptyDir` state**, and anything that must
+> survive goes to an external store the agent talks to over the network. If you
+> genuinely need a per-session PVC, set `replicas: 0` and accept cold starts —
+> a pool you always bypass is pure cost. That is a real limitation of
+> agent-sandbox v0.5.2, not a configuration mistake.
 
 ---
 
@@ -406,11 +514,28 @@ Two claims, same healthy 2-replica pool:
 
 | Claim | `spec.env`? | Controller log | `launch_type` | Time-to-ready |
 |---|---|---|---|---|
-| `claim-warm` | **yes** | `"creating sandbox from template"` | `cold` | **+6 s** |
-| `claim-noenv` | **no** | `"Successfully adopted sandbox from warm pool"` | `warm` | **−136 s** |
+| `oc-claim-env` | **yes** | `"creating sandbox from template"` | `cold` | **+6 s** |
+| `oc-claim-warm` | **no** | `"Successfully adopted sandbox from warm pool"` | `warm` | **−86 s** |
 
-A **negative** time-to-ready is the cleanest possible proof of a pool hit: the
-sandbox was Ready more than two minutes before the claim that got it existed.
+Measured with the real OpenClaw image, both claims against the same
+`openclaw-pool`. A **negative** time-to-ready is the cleanest possible proof of a
+pool hit: the sandbox was Ready a minute and a half before the claim that got it
+existed.
+
+Two honest caveats about those numbers, because they are easy to over-read:
+
+- **The magnitude of the negative number means nothing.** It is just how long that
+  pool member happened to sit idle before a claim arrived. Reproduce this and you
+  will get a different value. **The sign is the finding**, not the size.
+- **`+6 s` is a warm-*image* cold start.** The node already had the 324 MB
+  OpenClaw image cached. On a node seeing it for the first time the same cold path
+  took **~2.5 minutes**. The pool absorbs the image pull too — which is most of
+  what it is actually buying you.
+
+A pool hit also skips work *inside* the agent, not just the pod lifecycle. The
+adopted member had already logged `provider auth state pre-warmed` and
+`agent runtime plugins pre-warmed` before the claim existed: ~4 seconds of
+OpenClaw startup the user never waits for.
 
 The mechanism is in the labels. The pool stamps
 `agents.x-k8s.io/sandbox-pod-template-hash` on its members. Injecting env vars
@@ -456,23 +581,54 @@ references, or through the agent's own API after adoption. If you must use env,
 size the pool to zero and accept cold starts — at least you stop paying for pods
 nobody adopts.
 
-### 9b. The `/proc` lie
+### 9b. The `/proc` half-truth
 
-From inside a gVisor sandbox with a **256 Mi** limit:
+gVisor synthesises `/proc` rather than passing the host's through. What it puts
+there depends entirely on whether **you set a memory limit**:
 
 ```bash
-kubectl exec demo-agent -c agent -- head -2 /proc/meminfo
-# MemTotal:       12248276 kB     ← the HOST's 12 GiB, not the pod's 256 Mi
+# a sandbox WITH limits.memory: 1Gi
+kubectl exec demo-agent -c agent -- head -1 /proc/meminfo
+# MemTotal:        1048576 kB     ← exactly the limit. Correct.
+
+# the same image with NO memory limit
+kubectl exec openclaw-nolimit -- head -1 /proc/meminfo
+# MemTotal:       12248276 kB     ← the HOST's 12 GiB
 ```
 
-Every "how much memory do I have" code path is wrong inside a sandbox: Python's
-`psutil`, Node's `os.totalmem()`, JVM ergonomics. A runtime that sizes its heap
-from `MemTotal` will size for 12 GiB inside a 256 Mi container and get OOM-killed
-with no useful diagnostic.
+**Set a limit and gVisor tells the truth. Omit one and every "how much memory do
+I have" call inside the sandbox reports the whole node.** The same applies to CPU:
+`nproc` returns the limit-derived count when set, and the host's core count when
+not.
 
-**Take sandbox resource telemetry from `kubeletstats` — from outside — never from
-the agent's self-report from inside.** This is the single best "observability is
-different in a sandbox" moment in the episode.
+This is not academic, because runtimes size their heaps from exactly these
+numbers. The same OpenClaw image, same node, only the limit differs:
+
+| | `limits.memory: 1Gi` | no limit |
+|---|---|---|
+| `os.totalmem()` | 1 GiB | **11.68 GiB** |
+| V8 heap limit | 560 MB | **2240 MB** |
+| `os.cpus().length` | 2 | 4 |
+
+An unlimited sandbox lets Node grow a 2.2 GB heap on a node that is also running
+everyone else's agents. Python's `psutil`, JVM ergonomics and Go's
+`GOMAXPROCS` all read the same synthetic files and reach the same wrong
+conclusion.
+
+**Two rules:**
+
+1. **Always set `requests` *and* `limits` on sandbox containers.** Under gVisor
+   the limit is not just a cgroup ceiling — it is the only thing that makes
+   `/proc` honest.
+2. **Take sandbox resource telemetry from `kubeletstats` — from outside — never
+   from the agent's self-report from inside.** Even with limits set, you are
+   trusting the workload to report on itself.
+
+> **Note for anyone reading an older version of this repo:** an earlier draft
+> claimed `MemTotal` always reports the host's 12 GiB, citing a 256 Mi sandbox.
+> That was measured on a pod with **no memory limit** and the conclusion was
+> over-generalised. Re-measured: a 256 Mi-limited gVisor pod reports exactly
+> `262144 kB`. The trap is real, but it is *caused by the missing limit*.
 
 ### 9c. The error metric that lies
 
@@ -535,13 +691,23 @@ Observed transitions:
 |---|---|---|---|
 | create → pod running | `True` | — | `DependenciesReady` |
 | `operatingMode: Suspended` | `False` | `True` | `SandboxSuspended` / `PodTerminated` |
-| back to `Running` | `True` | — | `DependenciesReady` |
+| back to `Running` | `True` | **`True` (stale)** | `DependenciesReady` / `PodTerminated` |
+
+> ⚠️ **The `Suspended` condition is never cleared on resume.** After a
+> suspend/resume cycle the sandbox reports `Ready=True` *and*
+> `Suspended=True (PodTerminated)` simultaneously, indefinitely — confirmed on
+> v0.5.2 across a 30-second settle and a second full cycle. Anything that alerts
+> on `Suspended=True`, or counts suspended sandboxes from it, produces false
+> positives forever after the first suspend. **Gate on `Ready`, or on the absence
+> of a Pod — not on `Suspended`.**
 
 > ⚠️ **Suspend is not checkpoint/restore.** It **deletes the pod outright**
-> (`kubectl get pod` → NotFound) and recreates it on resume. Measured resume:
-> **~20 s — a full cold start.** Any "suspend idle agent sessions to save money"
-> strategy must budget that on wake, and any in-memory state in the agent is
-> gone. Persist to the `volumeClaimTemplates` PVC, which does survive.
+> (`kubectl get pod` → NotFound) and recreates it on resume. Measured resume with
+> the real OpenClaw image, on a node that already has the image cached:
+> new pod in **2 s**, pod Ready at **8 s**, gateway actually serving at **22 s** —
+> a full cold start. On a node without the image, add the ~2.5-minute pull.
+> Any "suspend idle agent sessions to save money" strategy must budget that on
+> wake, and any in-memory state in the agent is gone.
 
 TTL is the other lever — `shutdownTime` (RFC3339) with `shutdownPolicy`
 (`Retain` / `Delete` / `DeleteForeground`). The `ttl-victim` sandbox in the
@@ -603,6 +769,7 @@ so the agent's traces can be joined back to the sandbox that ran them.
 ```bash
 kubectl delete -f deploy/agent-sandbox/lifecycle-driver.yaml --ignore-not-found
 kubectl delete -f deploy/agent-sandbox/demo-sandbox.yaml --ignore-not-found
+kubectl delete secret openclaw-secrets -n default --ignore-not-found
 kubectl delete -f deploy/collectors/ --ignore-not-found
 kubectl delete -f deploy/dynatrace/dynakube.yaml --ignore-not-found
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox-with-extensions.yaml

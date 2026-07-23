@@ -123,16 +123,21 @@ surface you read after something else told you to look, not as an alert source.
 
 ## Sandbox resource usage — measured from outside
 
-`/proc` inside gVisor reports the **host's** memory: a pod with a 256 Mi limit
-reads `MemTotal: 12248276 kB`. Anything that self-reports resources from inside
-a sandbox (`psutil`, `os.totalmem()`, JVM ergonomics) is wrong, and a runtime
-that sizes its heap from `MemTotal` will size for 12 GiB inside a 256 Mi
-container and get OOM-killed.
+What `/proc` reports inside gVisor depends on whether you set a memory limit.
+**With** one it is exact — a 1 Gi sandbox reads `MemTotal: 1048576 kB`.
+**Without** one it is the whole node: `MemTotal: 12248276 kB` on this cluster's
+12 GiB workers, so `psutil`, `os.totalmem()`, JVM ergonomics and `GOMAXPROCS`
+all size for a machine the sandbox does not have. Full measurements, including
+the V8 heap-limit difference, are in [`../../TUTORIAL.md`](../../TUTORIAL.md)
+§9b.
 
 Both resource tiles therefore read `k8s.pod.cpu.usage` and
 `k8s.pod.memory.working_set` from **`kubeletstats` on the node DaemonSet** —
-outside the sandbox boundary, where the numbers are true. Measured working set
-is ~20–25 MiB per sandbox, against the 12 GiB the sandbox believes it has.
+outside the sandbox boundary. Even with limits set, a self-report is the
+workload reporting on itself; the node-level view is the one to alert on. Read
+the tile for current values rather than quoting a constant: working set depends
+entirely on the agent image, and the placeholder image these tiles were first
+validated against (~20–25 MiB) is nothing like a Node.js agent runtime.
 
 **Scoping caveat:** neither `kubeletstats` nor `k8sattributes` surfaces
 `runtimeClassName`, and while the `agents.x-k8s.io/sandbox-name-hash` pod label
