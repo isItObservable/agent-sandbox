@@ -48,7 +48,7 @@ data:
                 "name": "qwen3.6:latest",
                 "input": ["text"],
                 "contextWindow": 131072,
-                "params": { "num_ctx": 131072, "keep_alive": "15m" }
+                "params": { "num_ctx": 131072, "keep_alive": "15m", "thinking": false }
               }
             ]
           }

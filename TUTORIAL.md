@@ -484,8 +484,8 @@ Worth knowing before you rely on it, because two of these numbers are traps:
 | | |
 |---|---|
 | generation | **~87 tok/s** at `num_ctx: 131072` |
-| first token, warm, thinking **off** | **0.30 s** |
-| first *visible* token, warm, thinking **on** | **~5 s** |
+| first token, warm — **as configured, thinking off** | **0.30 s** |
+| first *visible* token if you re-enable thinking | **~5–11 s, variable** |
 | model load, **cold** | **~7 s** |
 
 The warm numbers are measured through the whole path — Service, EndpointSlice,
@@ -499,11 +499,13 @@ several hundred thinking tokens come first. Sending `"think": false` drops that
 to 0.30 s and does not change generation speed at all — the tokens/second above
 are identical either way. So the pause is thinking, not slowness.
 
-The lever for this is a model param, not a request flag: add `thinking: false`
-alongside `num_ctx` in the model's `params` block and OpenClaw forwards it as
-Ollama's `think`. Whether you want that is a judgement call — you are trading
-the model's reasoning for responsiveness — but if a local thinking model is
-spending its whole response budget on hidden reasoning, this is the knob.
+The lever is a model param, not a request flag: `thinking: false` alongside
+`num_ctx` in the model's `params` block, which OpenClaw forwards as Ollama's
+`think`. **The config below sets it**, which is why the gateway announces
+`thinking=off` at boot. That is a deliberate trade — you give up the model's
+reasoning to get a responsive agent — and it is the right one here, because a
+demo agent that pauses five to eleven seconds before every reply reads as
+broken. If you want the reasoning back, delete that one key.
 
 **The cold trap.** `keep_alive` decides how long Ollama holds the weights after
 the last request. Idle past it and the next request pays a full reload, and
