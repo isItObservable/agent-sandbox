@@ -24,7 +24,7 @@ set -euo pipefail
 
 # The model backend. This demo runs self-hosted Ollama on a host OUTSIDE the
 # cluster — see agent-sandbox/ollama-endpoint.yaml for why (the demo model is
-# 81.4 GB and there is no GPU here). Give the LAN address of a host running
+# 23.9 GB and there is no GPU here). Give the LAN address of a host running
 # `ollama serve` bound to 0.0.0.0.
 : "${OLLAMA_HOST:?set OLLAMA_HOST, the LAN IP of the host running \`ollama serve\` (e.g. 10.20.30.10)}"
 

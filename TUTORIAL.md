@@ -457,10 +457,10 @@ worker-1        4   11.6Gi
 worker-2        4   11.6Gi
 ```
 
-This demo runs `qwen3.5:122B` — **81.4 GB** of weights at q4. It is not close,
-and even a 32B model would not fit (`qwen3:32b` is 20.2 GB against 11.6 GiB
-allocatable), there is no GPU, and on CPU either would answer at roughly 1–2
-tokens/second if it somehow loaded. So Ollama runs on a machine with the memory
+This demo runs `qwen3.6:latest` — **23.9 GB** of weights at Q4_K_M, roughly twice
+the 11.6 GiB a whole worker has allocatable, so it cannot be scheduled here at
+all. There is also no GPU, and on CPU it would answer at roughly 1–2 tokens per
+second even if the memory were there. So Ollama runs on a machine with the room
 for it and the sandbox reaches it over the LAN.
 
 Ask the daemon rather than trusting a tag someone wrote down — model names get
@@ -468,42 +468,57 @@ garbled, and a wrong one is a runtime error at the worst possible moment:
 
 ```console
 $ curl -s http://$OLLAMA_HOST:11434/api/tags | jq -r '.models[].name'
-$ curl -s http://$OLLAMA_HOST:11434/api/show -d '{"model":"qwen3.5:122B"}' | jq '.capabilities'
+$ curl -s http://$OLLAMA_HOST:11434/api/show -d '{"model":"qwen3.6:latest"}' | jq '.capabilities'
 ["completion","vision","tools","thinking"]
 ```
 
 `tools` in that list is the one that matters: an agent whose model cannot call
-tools is a chatbot. The same call reports a 262144-token context; the config
-below asks for 131072, because the KV cache for the full window on a 122B model
-is itself larger than anything in this cluster.
+tools is a chatbot. Note `thinking` in the same list — it is not decoration, and
+it costs you more visible latency than anything else here. The call also reports
+a 262144-token context; the config below asks for 131072.
 
 ### What it actually costs, measured
 
-Worth knowing before you rely on it, because one of these numbers is a trap:
+Worth knowing before you rely on it, because two of these numbers are traps:
 
 | | |
 |---|---|
-| generation, warm | **~48 tok/s** at `num_ctx: 131072` |
-| time to first token, warm | **0.47 s** from inside a pooled sandbox |
-| time to first token, **cold** | **25–29 s** |
+| generation | **~87 tok/s** at `num_ctx: 131072` |
+| first token, warm, thinking **off** | **0.30 s** |
+| first *visible* token, warm, thinking **on** | **~5 s** |
+| model load, **cold** | **~7 s** |
 
 The warm numbers are measured through the whole path — Service, EndpointSlice,
 NetworkPolicy, LAN — and are indistinguishable from hitting the daemon directly,
 so none of the plumbing in this section costs you anything.
 
-The cold number is the one to plan around. `keep_alive` decides how long Ollama
-holds the weights after the last request; the config below asks for 15 minutes.
-Idle past that and the next request pays a full reload — and because that reload
-happens *inside* the agent's first model call, what you see is an agent that
-sits there for half a minute, which looks exactly like the egress trap above.
-Two different faults, one symptom. Check `curl -s $OLLAMA_HOST:11434/api/ps`
-before blaming the network: if the model is not listed, it is a reload, not a
-policy.
+**The thinking trap.** This model reasons before it answers, and the reasoning
+tokens are not the answer. The first *chunk* arrives in 0.3 s, but the first
+chunk a reader would recognise as output takes about five seconds, because
+several hundred thinking tokens come first. Sending `"think": false` drops that
+to 0.30 s and does not change generation speed at all — the tokens/second above
+are identical either way. So the pause is thinking, not slowness.
 
-Raising `num_ctx` to the full 262144 did not change the memory split on the host
-we measured (84.6 GB total, 3.7 GB of it on CPU either way) and did not slow
-generation down, so the 131072 in the config is a conservative choice rather
-than a necessary one.
+**The cold trap.** `keep_alive` decides how long Ollama holds the weights after
+the last request. Idle past it and the next request pays a full reload, and
+because that reload happens *inside* the agent's first model call, what you see
+is an agent sitting silent — which looks exactly like the egress trap above.
+Two different faults, one symptom. Check `curl -s $OLLAMA_HOST:11434/api/ps`
+before blaming the network: if the model is not listed, it is a reload.
+
+Be careful with `keep_alive`: **Ollama's own default is 5 minutes, not the 15 in
+the config below.** The 15 applies only when the caller actually sends it, so a
+client that omits it gets a window three times shorter than this file implies.
+Verify against the daemon rather than the config — `expires_at` in `/api/ps` is
+the authoritative answer:
+
+```console
+$ curl -s http://$OLLAMA_HOST:11434/api/ps | jq -r '.models[] | "\(.name) expires \(.expires_at)"'
+```
+
+Raising `num_ctx` to the full 262144 changed neither generation speed nor the
+memory split (26.6 GB resident, entirely on the GPU, nothing spilled to CPU), so
+the 131072 in the config is a conservative choice rather than a necessary one.
 
 If you want the model in-cluster instead, `qwen3:8b` is 5.2 GB and fits — every
 trap below still applies, because they are about DNS and egress, not model size.

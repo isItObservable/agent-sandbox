@@ -7,11 +7,12 @@
 # pooled sandbox reads at boot — i.e. a full warm-pool recycle to change one
 # address. Here it is an EndpointSlice edit and nothing restarts.
 #
-# WHY OFF-CLUSTER: the demo model (`qwen3.5:122B`) is 81.4 GB of weights at q4.
-# This cluster's workers have 11.6 GiB allocatable and no GPU -- even a 32B
-# model (~20 GB) could not be loaded here at any quantisation, and on CPU it
-# would answer at ~1-2 tok/s if it somehow fit. Ollama therefore runs on a
-# machine with the memory for it and the sandbox reaches it over the LAN.
+# WHY OFF-CLUSTER: the demo model (`qwen3.6:latest`) is 23.9 GB of weights at
+# Q4_K_M. This cluster's workers have 11.6 GiB allocatable and no GPU -- about
+# half what the weights alone need, so it cannot be scheduled here at any
+# quantisation, and on CPU it would answer at ~1-2 tok/s if it somehow fit.
+# Ollama therefore runs on a machine with the memory for it and the sandbox
+# reaches it over the LAN.
 #
 # If you instead run Ollama IN-cluster (e.g. `qwen3:8b`, 5.2 GB, which does
 # fit), delete this file and point the ConfigMap at that Service directly —
