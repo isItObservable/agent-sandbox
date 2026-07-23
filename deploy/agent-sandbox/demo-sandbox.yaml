@@ -57,7 +57,8 @@ data:
       "agents": {
         "defaults": {
           "workspace": "/workspace/agent",
-          "model": { "primary": "ollama/qwen3.6:latest" }
+          "model": { "primary": "ollama/qwen3.6:latest" },
+          "thinkingDefault": "off"
         }
       }
     }
