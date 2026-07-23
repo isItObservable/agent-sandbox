@@ -1,0 +1,58 @@
+# Where the model actually lives — the ONE file you edit per environment
+# ============================================================================
+# OpenClaw's config names `http://ollama.default.svc.cluster.local:11434`, not
+# an IP. That indirection exists for a specific reason: the model backend is the
+# only environment-specific value in this whole manifest set, and if it sat in
+# the ConfigMap then moving Ollama would rewrite `openclaw.json`, which every
+# pooled sandbox reads at boot — i.e. a full warm-pool recycle to change one
+# address. Here it is an EndpointSlice edit and nothing restarts.
+#
+# WHY OFF-CLUSTER: the demo model (`qwen3.6:latest`) is 23.9 GB of weights at
+# Q4_K_M. This cluster's workers have 11.6 GiB allocatable and no GPU -- about
+# half what the weights alone need, so it cannot be scheduled here at any
+# quantisation, and on CPU it would answer at ~1-2 tok/s if it somehow fit.
+# Ollama therefore runs on a machine with the memory for it and the sandbox
+# reaches it over the LAN.
+#
+# If you instead run Ollama IN-cluster (e.g. `qwen3:8b`, 5.2 GB, which does
+# fit), delete this file and point the ConfigMap at that Service directly —
+# but keep the DNS allow in openclaw-netpol.yaml, you still need it.
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: default
+  labels:
+    app: ollama
+spec:
+  # No selector: the backend is not a pod in this cluster. Kubernetes will not
+  # manage endpoints for this Service, so we supply the EndpointSlice below.
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: ollama
+  namespace: default
+  labels:
+    # REQUIRED — this is what binds the slice to the Service above. Get it
+    # wrong and you get a Service with zero endpoints and no error anywhere.
+    kubernetes.io/service-name: ollama
+addressType: IPv4
+ports:
+  - name: http
+    port: 11434
+    protocol: TCP
+endpoints:
+  - addresses:
+      # >>> EDIT ME <<< the LAN address of the host running `ollama serve`.
+      # It must be bound to 0.0.0.0, not loopback: `OLLAMA_HOST=0.0.0.0:11434`.
+      # This same address must appear in openclaw-netpol.yaml's egress rule.
+      - "10.20.30.10"
+    conditions:
+      ready: true

@@ -129,7 +129,7 @@ Re-measured against the real OpenClaw image (`openclaw-pool`, same method):
 | `oc-claim-warm` (**warm**) | 13:37:22 | 13:35:56 | **−86 s** |
 
 A **negative** time-to-ready is the cleanest possible proof of a warm-pool hit: the sandbox
-was Ready *before the claim that got it existed*. Great on camera.
+was Ready *before the claim that got it existed*.
 
 **Two caveats, so the numbers are not over-read.** The *magnitude* of the negative value is
 just how long that member happened to idle before a claim arrived — it varies run to run, so
