@@ -499,6 +499,12 @@ several hundred thinking tokens come first. Sending `"think": false` drops that
 to 0.30 s and does not change generation speed at all — the tokens/second above
 are identical either way. So the pause is thinking, not slowness.
 
+The lever for this is a model param, not a request flag: add `thinking: false`
+alongside `num_ctx` in the model's `params` block and OpenClaw forwards it as
+Ollama's `think`. Whether you want that is a judgement call — you are trading
+the model's reasoning for responsiveness — but if a local thinking model is
+spending its whole response budget on hidden reasoning, this is the knob.
+
 **The cold trap.** `keep_alive` decides how long Ollama holds the weights after
 the last request. Idle past it and the next request pays a full reload, and
 because that reload happens *inside* the agent's first model call, what you see
@@ -507,10 +513,12 @@ Two different faults, one symptom. Check `curl -s $OLLAMA_HOST:11434/api/ps`
 before blaming the network: if the model is not listed, it is a reload.
 
 Be careful with `keep_alive`: **Ollama's own default is 5 minutes, not the 15 in
-the config below.** The 15 applies only when the caller actually sends it, so a
-client that omits it gets a window three times shorter than this file implies.
-Verify against the daemon rather than the config — `expires_at` in `/api/ps` is
-the authoritative answer:
+the config below.** The 15 applies only when the caller actually sends it. This
+stack does — OpenClaw lifts `keep_alive` out of `params` to the top level of the
+Ollama request, and a real agent turn moves `expires_at` to exactly 15 minutes
+out — but a client that omits it gets a window three times shorter than this
+file implies. Either way, verify against the daemon rather than the config;
+`expires_at` in `/api/ps` is the authoritative answer:
 
 ```console
 $ curl -s http://$OLLAMA_HOST:11434/api/ps | jq -r '.models[] | "\(.name) expires \(.expires_at)"'
