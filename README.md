@@ -151,9 +151,12 @@ with environment variables — the *normal* thing to do — changes the effectiv
 template, so no pooled sandbox matches the pool's
 `agents.x-k8s.io/sandbox-pod-template-hash` and the claim controller falls
 through to a cold create. You get a **0% pool hit rate while still paying for
-every pooled pod**. Nothing errors. Nothing warns.
+every pooled pod**. Nothing errors, nothing warns, and no Kubernetes Event
+records it. The controller mentions it in one `info` line
+(`"Bypassing warm pool adoption because custom configuration is provided"`)
+buried among thousands.
 
-The only way to see it is telemetry:
+The way to see it is telemetry:
 
 ```dql
 timeseries sb = avg(agent_sandboxes), by:{launch_type}, filter: owned_by == "SandboxClaim"

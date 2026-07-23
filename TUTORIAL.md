@@ -399,7 +399,8 @@ findings that only show up when you actually run this.
 
 ### 9a. The warm-pool trap ⭐
 
-**Setting `spec.env` on a `SandboxClaim` silently defeats the warm pool.**
+**Setting `spec.env` — or `volumeClaimTemplates` — on a `SandboxClaim` silently
+defeats the warm pool.**
 
 Two claims, same healthy 2-replica pool:
 
@@ -417,12 +418,28 @@ changes the effective pod template, no pooled member matches the hash, and the
 claim controller falls through to a cold create. The pool sits at
 `readyReplicas: 2`, untouched, the whole time.
 
-**Nothing errors. Nothing warns.** You get a 0% hit rate at full pool cost, and
-personalising a session with env vars is the *normal* thing to do. Reproduce it:
+**Nothing errors and nothing warns.** You get a 0% hit rate at full pool cost,
+and personalising a session with env vars is the *normal* thing to do.
+
+The controller does say what it did — but at `info`, in one line, buried among
+thousands:
+
+```
+Bypassing warm pool adoption because custom configuration is provided
+(env or volume claim templates)
+```
+
+So it is *technically* logged and *practically* invisible: nothing surfaces it,
+no metric counts it, and no Kubernetes Event records it (§9d). That string is
+worth a saved query and an alert of its own — it names the exact claim that
+bypassed the pool. Reproduce it:
 
 ```bash
 kubectl get sandbox -o custom-columns=\
 NAME:.metadata.name,LAUNCH:.metadata.labels.agents\\.x-k8s\\.io/launch-type
+
+kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller \
+  | grep -i "Bypassing warm pool"
 ```
 
 The dashboard tile:
@@ -433,10 +450,11 @@ timeseries sb = avg(agent_sandboxes), by:{launch_type}, filter: owned_by == "San
 
 rendered as `warm / (warm + cold)`. Pinned at cold = your pool is decorative.
 
-**Fix:** don't personalise through `spec.env`. Pass session config through a
-mounted Secret/ConfigMap the template already references, or through the agent's
-own API after adoption. If you must use env, size the pool to zero and accept
-cold starts — at least you stop paying for pods nobody adopts.
+**Fix:** don't personalise through `spec.env` or per-claim `volumeClaimTemplates`.
+Pass session config through a mounted Secret/ConfigMap the template already
+references, or through the agent's own API after adoption. If you must use env,
+size the pool to zero and accept cold starts — at least you stop paying for pods
+nobody adopts.
 
 ### 9b. The `/proc` lie
 
