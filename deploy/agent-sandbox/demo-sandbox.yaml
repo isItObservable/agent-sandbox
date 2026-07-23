@@ -30,10 +30,35 @@ data:
         "mode": "local",
         "bind": "lan",
         "port": 18789,
-        "auth": { "mode": "token" }
+        "auth": { "mode": "token" },
+        "controlUi": {
+          "allowedOrigins": ["http://10.20.30.20:18789"]
+        }
+      },
+      "models": {
+        "providers": {
+          "ollama": {
+            "baseUrl": "http://ollama.default.svc.cluster.local:11434",
+            "apiKey": "ollama-local",
+            "api": "ollama",
+            "timeoutSeconds": 300,
+            "models": [
+              {
+                "id": "qwen3.5:122B",
+                "name": "qwen3.5:122B",
+                "input": ["text"],
+                "contextWindow": 131072,
+                "params": { "num_ctx": 131072, "keep_alive": "15m" }
+              }
+            ]
+          }
+        }
       },
       "agents": {
-        "defaults": { "workspace": "/workspace/agent" }
+        "defaults": {
+          "workspace": "/workspace/agent",
+          "model": { "primary": "ollama/qwen3.5:122B" }
+        }
       }
     }
   AGENTS.md: |
@@ -54,6 +79,13 @@ spec:
   shutdownPolicy: Retain
   service: true
   podTemplate:
+    metadata:
+      # These labels land on the POD (verified live), which is what makes a
+      # legible Service selector possible. The controller only ever stamps
+      # `agents.x-k8s.io/sandbox-name-hash=<opaque>` -- see openclaw-ui-service.yaml.
+      labels:
+        app: openclaw
+        role: ui
     spec:
       # THE POINT OF THE DEMO: run the agent under the gVisor sandbox runtime.
       runtimeClassName: gvisor
@@ -77,11 +109,16 @@ spec:
                 secretKeyRef:
                   name: openclaw-secrets
                   key: OPENCLAW_GATEWAY_TOKEN
-            - name: ANTHROPIC_API_KEY
+            # Ollama over the LAN. "ollama-local" is OpenClaw's marker for an
+            # unauthenticated local/LAN daemon -- it is not a credential. The
+            # real endpoint lives in ollama-endpoint.yaml, so repointing the
+            # model backend never touches this ConfigMap and never restarts
+            # the warm pool.
+            - name: OLLAMA_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: openclaw-secrets
-                  key: ANTHROPIC_API_KEY
+                  key: OLLAMA_API_KEY
           volumeMounts:
             - name: config
               mountPath: /etc/openclaw
