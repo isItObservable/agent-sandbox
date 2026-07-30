@@ -249,6 +249,20 @@ kubectl wait --for=condition=Ready sandbox/demo-agent --timeout=10m
 > and `openclaw-pool.yaml` must change to match — they are mounted by name, and
 > a mismatch shows up as `CreateContainerConfigError`, not as a clear message.
 
+> **Following the upstream example too?** The official
+> [`agent-sandbox` OpenClaw example](https://agent-sandbox.sigs.k8s.io/docs/use-cases/examples/openclaw-sandbox/)
+> puts a cloud model key in an `openclaw-provider-keys` Secret. We deliberately
+> diverge: the model here is self-hosted Ollama over the LAN, so there is no
+> cloud key to store — `ollama-local` above is a no-auth marker, not a secret.
+> Everything else (the `SandboxTemplate` + `SandboxWarmPool` + `SandboxClaim`
+> shape, the `gvisor` RuntimeClass, the gateway on `18789`) matches upstream.
+> Two smaller, intentional differences: the pod carries an explicit
+> least-privilege `securityContext` (`runAsNonRoot` uid 1000 + `drop: ["ALL"]`)
+> — the `openclaw:slim` image already runs as uid 1000, so this only makes the
+> guarantee explicit — and instead of the upstream init-container that seeds
+> config, we mount the `openclaw-config` ConfigMap read-only directly, which is
+> simpler and has the same effect.
+
 > The first pull is **~324 MB**, so on a node that has never seen the image
 > expect **~2.5 minutes** before the pod even starts. That number is the whole
 > economic argument for the warm pool in Step 7 — keep it in mind.
