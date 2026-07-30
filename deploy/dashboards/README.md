@@ -1,18 +1,46 @@
 # Dashboards
 
-The Dynatrace dashboard for this episode:
-[`agent-sandbox-fleet.dashboard.json`](agent-sandbox-fleet.dashboard.json).
+The Dynatrace dashboard for this episode is stored in **two forms**, same content:
 
-Import it into your tenant (**Dashboards → Upload**), or deploy it with
-[`dtctl`](https://github.com/dynatrace-oss/dtctl):
+- **[`agent-sandbox-fleet.dashboard.yaml`](agent-sandbox-fleet.dashboard.yaml)** —
+  `dtctl`-ready (`name` + `type` + `content`). This is the canonical apply artifact.
+- **[`agent-sandbox-fleet.dashboard.json`](agent-sandbox-fleet.dashboard.json)** —
+  the raw payload, for **Dashboards → Upload** in the UI or the `dt-app-dashboards`
+  skill workflow.
+
+## Install with `dtctl` (recommended)
+
+[`dtctl`](https://github.com/dynatrace-oss/dtctl) applies a dashboard straight from
+its definition file. Point it at your tenant once, then apply:
 
 ```bash
-dtctl apply -f agent-sandbox-fleet.dashboard.json
+# 1. one-time: register your Dynatrace environment as a dtctl context.
+#    The API token needs the document:documents:write scope; dtctl stores it in
+#    the OS keyring and you reference it by name via --token-ref
+#    (see `dtctl config --help`). Verify with `dtctl config get-contexts`.
+dtctl config set-context agent-sandbox \
+  --environment https://YOUR_TENANT.apps.dynatrace.com \
+  --token-ref agent-sandbox-token \
+  --safety-level readwrite-all
+dtctl config use-context agent-sandbox
+
+# 2. preview, then apply.
+dtctl apply -f agent-sandbox-fleet.dashboard.yaml --dry-run
+dtctl apply -f agent-sandbox-fleet.dashboard.yaml
 ```
 
-> The export metadata (`id`, `owner`, `version`, `modificationInfo`) has been
-> **stripped** from the committed JSON, so importing it always creates a **new**
-> dashboard in your tenant rather than updating the one it was exported from.
+The committed YAML carries **no `id`**, so `dtctl apply` **creates a new**
+dashboard on your tenant. To make re-applies **update in place** instead, add an
+`id:` line at the top of the file (the dashboard's UUID from your tenant) — `dtctl`
+then matches by `id` and never duplicates. The tile DQL carries no time-range
+filters, so the dashboard's own time picker governs the window.
+
+### Or upload the JSON in the UI
+
+**Dashboards → Upload** → pick `agent-sandbox-fleet.dashboard.json`. The export
+metadata (`id`, `owner`, `version`, `modificationInfo`) is **stripped** from the
+committed JSON, so an upload always creates a **new** dashboard rather than
+updating the one it was exported from.
 
 Every source metric is confirmed present with the pipeline in
 [`../collectors/`](../collectors/) — see
