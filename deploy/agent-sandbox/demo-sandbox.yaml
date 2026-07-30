@@ -93,6 +93,17 @@ spec:
       containers:
         - name: agent
           image: ghcr.io/openclaw/openclaw:slim
+          # The openclaw:slim image already runs as uid 1000 (node); we declare
+          # it explicitly and drop every capability so the sandbox pod is
+          # least-privilege on paper as well as in practice. No fsGroup is
+          # needed -- /workspace is an emptyDir writable by uid 1000.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: gateway
               containerPort: 18789

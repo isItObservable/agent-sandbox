@@ -40,6 +40,17 @@ spec:
       containers:
         - name: agent
           image: ghcr.io/openclaw/openclaw:slim
+          # The openclaw:slim image already runs as uid 1000 (node); we declare
+          # it explicitly and drop every capability so pooled members are
+          # least-privilege on paper as well as in practice. No fsGroup is
+          # needed -- /workspace is an emptyDir writable by uid 1000.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: gateway
               containerPort: 18789
@@ -94,9 +105,14 @@ spec:
         - name: config
           configMap:
             name: openclaw-config
-        # emptyDir, not a PVC: a PVC named here would be shared by every pooled
-        # member, and a per-claim volumeClaimTemplate bypasses the pool. Pooled
-        # agents get ephemeral state — see the trade-off note in TUTORIAL.md §7.
+        # emptyDir: this demo gives pooled agents ephemeral state. For state
+        # that survives a pod restart, the SandboxTemplate supports a top-level
+        # `spec.volumeClaimTemplates` (+ `volumeClaimTemplatesPolicy: Allowed`),
+        # which the controller provisions PER pool member -- StatefulSet-style,
+        # NOT a single shared PVC -- so it is fully warm-pool compatible. It
+        # needs a StorageClass/provisioner in the cluster; this one has none, so
+        # we stay on emptyDir. The warm-pool trap is per-CLAIM config
+        # (`spec.env` / claim-level volumes), not template-level volumes.
         - name: workspace
           emptyDir: {}
         - name: tmp
