@@ -684,6 +684,50 @@ pin it (`spec.loadBalancerIP`) rather than letting MetalLB auto-assign — a
 cluster rebuild that hands you `.242` breaks the login with no error that points
 at the cause.
 
+### Trap 5 — the page loads over plain HTTP and STILL cannot log in ⚠️
+
+This one only bites from a second machine, and the error points at everything
+except the cause. Open `http://10.20.30.20:18789` from your laptop — not the
+gateway host — paste the token, and the gateway rejects the Control-UI
+handshake:
+
+```
+control ui requires device identity (use HTTPS or localhost secure context)
+```
+
+Why: browsers run `http://<lan-ip>` as a **non-secure context** and block
+WebCrypto, so the UI cannot sign the device-identity challenge the gateway
+requires on top of the token. And the tempting fix does not fix it:
+`gateway.controlUi.allowInsecureAuth: true` is a **loopback-only** toggle —
+the gateway checks the *connection's* remote address, and your laptop is not
+loopback. Verified against the gateway source and live: a LAN client with a
+valid token is still rejected. Your options, in order of pragmatism:
+
+1. **Break-glass (what this demo ships):**
+   `"controlUi": { "dangerouslyDisableDeviceAuth": true }` — skips the
+   device-identity check; token auth stays mandatory. Documented as a severe
+   downgrade, so keep it on a disposable sandbox and **remove it when the demo
+   is done** (`openclaw security audit` warns while it is on). It is already
+   set in `demo-sandbox.yaml` with the warning comment.
+2. **Proper:** HTTPS in front of the gateway (e.g. Tailscale Serve) — a secure
+   context makes WebCrypto available and device identity just works.
+3. **Browser-side:** Chrome `--unsafely-treat-insecure-origin-as-secure=http://10.20.30.20:18789`
+   — zero server config, but per-launch and easy to forget.
+
+### Access the Control UI — recap
+
+- URL: `http://<WEBUI_IP>:18789` (the pinned MetalLB address from Step 7b).
+- Auth: paste the gateway token in the UI's settings — it is sent as
+  `connect.params.auth.token`. Never on screen, never in the URL.
+- There is deliberately **no `kubectl port-forward` fallback**: port-forward
+  into a gVisor/runsc sandbox is unsupported (the kubelet dials loopback in a
+  network namespace the sandboxed netstack does not own — you get
+  `connection refused` with a healthy pod). This is the gap the upstream
+  **Sandbox Router** exists to close; the LoadBalancer Service is the access
+  path for this tutorial.
+- If the page loads but login fails, re-read Traps 4 and 5 — both fail *after*
+  the page renders, with the real cause only visible in the gateway log.
+
 ### Before you leave it running
 
 This publishes an agent that executes code onto your LAN. The gateway binds

@@ -24,6 +24,15 @@ data:
   # bind: "lan" is required for the Service to reach the gateway. OpenClaw
   # defaults to loopback-only, which works with `kubectl port-forward` and
   # nothing else. A non-loopback bind REQUIRES auth to be configured.
+  #
+  # dangerouslyDisableDeviceAuth — DEMO-ONLY break-glass. Browsers treat
+  # plain-http://<lan-ip> as a non-secure context and block WebCrypto, so the
+  # Control UI cannot perform device-identity auth from a LAN browser, and
+  # `allowInsecureAuth` does NOT help (it is loopback-only). This flag skips
+  # the device-identity check; token auth stays mandatory. It is a documented
+  # severe downgrade — keep it on a disposable sandbox, and REMOVE it after
+  # the demo (`openclaw security audit` warns while it is on). The proper fix
+  # is HTTPS in front of the gateway. See TUTORIAL.md "Access the Control UI".
   openclaw.json: |
     {
       "gateway": {
@@ -32,7 +41,8 @@ data:
         "port": 18789,
         "auth": { "mode": "token" },
         "controlUi": {
-          "allowedOrigins": ["http://10.20.30.20:18789"]
+          "allowedOrigins": ["http://10.20.30.20:18789"],
+          "dangerouslyDisableDeviceAuth": true
         }
       },
       "models": {
