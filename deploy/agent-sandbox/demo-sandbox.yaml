@@ -33,6 +33,10 @@ data:
   # severe downgrade — keep it on a disposable sandbox, and REMOVE it after
   # the demo (`openclaw security audit` warns while it is on). The proper fix
   # is HTTPS in front of the gateway. See TUTORIAL.md "Access the Control UI".
+  # Version window: verified functional on OpenClaw 2026.6.34 (the image pinned
+  # below) and still read in 2026.7.x source, but upstream marks the key retired
+  # in a newer release line — on retirement-era builds it silently no-ops and
+  # the path becomes token + device pairing over plain HTTP instead.
   openclaw.json: |
     {
       "gateway": {
@@ -102,7 +106,13 @@ spec:
       runtimeClassName: gvisor
       containers:
         - name: agent
-          image: ghcr.io/openclaw/openclaw:slim
+          # PINNED, deliberately: the break-glass flag above is version-dependent
+          # (see the ConfigMap comment), and the floating `:slim` tag has already
+          # moved past the A/B-proven build — a fresh pull today serves a
+          # different image than the one this tutorial was verified against.
+          # 2026.6.34 = live-verified on the demo cluster 2026-08-27. Digest is
+          # the multi-arch index digest the `2026.6.34` tag resolved to that day.
+          image: ghcr.io/openclaw/openclaw:2026.6.34@sha256:47d342bafe83bd3b2dca6f1d8d8b608ba7b542a1952564960648943346206759
           # The openclaw:slim image already runs as uid 1000 (node); we declare
           # it explicitly and drop every capability so the sandbox pod is
           # least-privilege on paper as well as in practice. No fsGroup is
