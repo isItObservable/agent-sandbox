@@ -224,7 +224,10 @@ dashboard tile — a failing conversion webhook breaks every API call to the CRD
 
 ## Step 6 — Your first Sandbox, and proving the boundary
 
-The demo agent is **OpenClaw** (`ghcr.io/openclaw/openclaw:slim`) — a real Node.js
+The demo agent is **OpenClaw** (`ghcr.io/openclaw/openclaw`, pinned to the
+live-verified `2026.6.34` build by digest in `demo-sandbox.yaml` — the floating
+`:slim` tag has already moved past it, and the Control-UI break-glass in
+Trap 5 is version-dependent) — a real Node.js
 agent gateway, not a sleep-forever placeholder. It needs one model-provider key
 and a gateway token:
 
@@ -283,7 +286,7 @@ spec:
       runtimeClassName: gvisor  # ← THE POINT
       containers:
         - name: agent
-          image: ghcr.io/openclaw/openclaw:slim
+          image: ghcr.io/openclaw/openclaw:2026.6.34@sha256:47d342bafe83bd3b2dca6f1d8d8b608ba7b542a1952564960648943346206759
           # ...
 ```
 
@@ -709,6 +712,12 @@ valid token is still rejected. Your options, in order of pragmatism:
    downgrade, so keep it on a disposable sandbox and **remove it when the demo
    is done** (`openclaw security audit` warns while it is on). It is already
    set in `demo-sandbox.yaml` with the warning comment.
+   **Version window:** verified on OpenClaw **2026.6.34** (the build pinned in
+   `demo-sandbox.yaml`) and still read in 2026.7.x source, but upstream marks
+   the key **retired in a newer release line** — on retirement-era builds it
+   silently no-ops and you are back at `close(1008)`; the natural path there
+   is token + device pairing over plain HTTP (a pure-JS identity, no WebCrypto),
+   or option 2 below.
 2. **Proper:** HTTPS in front of the gateway (e.g. Tailscale Serve) — a secure
    context makes WebCrypto available and device identity just works.
 3. **Browser-side:** Chrome `--unsafely-treat-insecure-origin-as-secure=http://10.20.30.20:18789`
@@ -727,6 +736,9 @@ valid token is still rejected. Your options, in order of pragmatism:
   path for this tutorial.
 - If the page loads but login fails, re-read Traps 4 and 5 — both fail *after*
   the page renders, with the real cause only visible in the gateway log.
+- The break-glass flag is tied to the pinned image: if you swap in a newer
+  OpenClaw build, re-check Trap 5's version-window note before assuming
+  `dangerouslyDisableDeviceAuth` still does anything.
 
 ### Before you leave it running
 

@@ -39,7 +39,11 @@ spec:
       runtimeClassName: gvisor
       containers:
         - name: agent
-          image: ghcr.io/openclaw/openclaw:slim
+          # Pinned to the same live-verified build as demo-sandbox.yaml — the
+          # Control-UI break-glass flag in the shared config is version-
+          # dependent, and the floating `:slim` tag no longer serves the
+          # A/B-proven image. See demo-sandbox.yaml for the full note.
+          image: ghcr.io/openclaw/openclaw:2026.6.34@sha256:47d342bafe83bd3b2dca6f1d8d8b608ba7b542a1952564960648943346206759
           # The openclaw:slim image already runs as uid 1000 (node); we declare
           # it explicitly and drop every capability so pooled members are
           # least-privilege on paper as well as in practice. No fsGroup is
