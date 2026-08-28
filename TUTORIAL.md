@@ -728,6 +728,21 @@ valid token is still rejected. Your options, in order of pragmatism:
 - URL: `http://<WEBUI_IP>:18789` (the pinned MetalLB address from Step 7b).
 - Auth: paste the gateway token in the UI's settings — it is sent as
   `connect.params.auth.token`. Never on screen, never in the URL.
+- Get the token out of the Secret — name the key explicitly, it holds two:
+
+  ```bash
+  kubectl -n default get secret openclaw-secrets \
+    -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d | tr -d '\n'
+  ```
+
+  `OPENCLAW_GATEWAY_TOKEN` (64 chars) is the gateway credential. `***`
+  (12 chars) is the no-auth marker from Step 5 — pasting *it* returns
+  `unauthorized: gateway token mismatch` (proven live while filming prep).
+- The Control UI caches one token per gateway URL per tab: when re-entering,
+  **fully replace** the old value — do not append.
+- Zero-paste alternative: `kubectl exec demo-agent -- openclaw dashboard --no-open`
+  prints a ready-to-open URL with the token as a URL fragment. Never post that
+  URL anywhere it will be logged or shared.
 - There is deliberately **no `kubectl port-forward` fallback**: port-forward
   into a gVisor/runsc sandbox is unsupported (the kubelet dials loopback in a
   network namespace the sandboxed netstack does not own — you get
