@@ -1,5 +1,10 @@
 # Reaching the OpenClaw WebUI from a browser outside the cluster
 # ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships a documentation
+# placeholder (10.20.30.20 as loadBalancerIP). deploy/deploy.sh rewrites it
+# from WEBUI_IP; TUTORIAL.md readers — edit it first. Applied as-is, MetalLB
+# hands the WebUI an address outside your pool and the browser just hangs.
+# ============================================================================
 # The Sandbox controller's own `service: true` Service CANNOT be used for this.
 # Verified live:
 #

@@ -1,5 +1,10 @@
 # agent-sandbox demo — a real OpenClaw agent Sandbox running under gVisor
 # ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships a documentation
+# placeholder (10.20.30.20 in allowedOrigins). deploy/deploy.sh rewrites it
+# from WEBUI_IP; TUTORIAL.md readers — edit it first. Applied as-is, the
+# Control UI loads and then refuses every login from your real origin.
+# ============================================================================
 # Proves the episode's core claim end to end: a real agent runtime (OpenClaw,
 # a Node.js gateway) executing inside the gVisor userspace kernel rather than
 # sharing the host kernel.

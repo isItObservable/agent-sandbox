@@ -106,14 +106,24 @@ for f in $(grep -oE '\$\{HERE\}/agent-sandbox/[a-z0-9.-]+\.yaml' "${HERE}/deploy
   done
   [ -n "$carried" ] || { ok "$base carries no environment-specific address"; continue; }
 
-  cmd=$(grep -E "^ *sed .*${base}|^ *sed -e" "${HERE}/deploy.sh" | grep -A0 -B0 "" | head -1 >/dev/null; \
-        awk -v b="$base" '/^ *sed /{buf=$0; while (buf ~ /\\$/) {getline nx; sub(/\\$/,"",buf); buf=buf nx} if (buf ~ b) {sub(/\| *kubectl.*/,"",buf); print buf; exit}}' "${HERE}/deploy.sh")
+  cmd=$(awk -v b="$base" '/^ *sed |^ *apply_substituted /{buf=$0; while (buf ~ /\\$/) {getline nx; sub(/\\$/,"",buf); buf=buf " " nx} if (buf ~ b) {sub(/\| *kubectl.*/,"",buf); print buf; exit}}' "${HERE}/deploy.sh")
   [ -n "$cmd" ] && cmd=${cmd//\$\{HERE\}/$HERE}
+  # The guarded call may sit inside an if-block (the Cilium policy) — ltrim
+  # before shape-matching, or the leading spaces misroute it to the raw path.
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"
   if [ -z "$cmd" ]; then
     note "$base carries an environment-specific address ($(echo $carried)) but deploy.sh applies it unsubstituted"
     continue
   fi
-  out=$(eval "$cmd") || { note "$base substitution command failed to run"; continue; }
+  if [[ "$cmd" == apply_substituted* ]]; then
+    # Guarded form: apply_substituted <file> <sed-args...> — the substitution
+    # arguments are everything after the file path, the file is the target.
+    sub_file=$(awk '{print $2}' <<<"$cmd")
+    sub_args=$(cut -d' ' -f3- <<<"$cmd")
+    out=$(eval "sed $sub_args \"$sub_file\"") || { note "$base substitution command failed to run"; continue; }
+  else
+    out=$(eval "$cmd") || { note "$base substitution command failed to run"; continue; }
+  fi
   # Ignore comments: the cilium policy quotes measured results verbatim on purpose.
   live=$(grep -vE '^\s*#' <<<"$out")
   leftover=0
@@ -132,6 +142,36 @@ echo "5. Nothing carries an internal ticket reference"
 if grep -rniE 'isi[-_ ]?[0-9]{3,4}' "${HERE}" >/dev/null 2>&1; then
   note "internal ticket id found under deploy/:"; grep -rniE 'isi[-_ ]?[0-9]{3,4}' "${HERE}" | head
 else ok "clean"; fi
+
+echo "6. Every placeholder-bearing manifest warns against direct kubectl apply"
+# deploy.sh is the supported install path. A bare
+# `kubectl apply -f deploy/agent-sandbox/` ships the documentation addresses
+# live — the agent then dials a model that answers nowhere. Each file carrying
+# a placeholder must say so in its header, because that header is the only
+# warning a manual apply ever shows.
+for f in ollama-endpoint.yaml demo-sandbox.yaml openclaw-ui-service.yaml openclaw-netpol.yaml openclaw-netpol-cilium.yaml; do
+  grep -q 'DO NOT kubectl apply' "${HERE}/agent-sandbox/$f" \
+    && ok "$f carries the direct-apply warning" \
+    || note "$f carries a placeholder but no direct-apply warning header"
+done
+
+echo "7. A live cluster, when reachable, must not carry a placeholder address"
+# The only gate that sees a manual apply — every check above is static. Skips
+# cleanly when there is no cluster: this script still requires none.
+if command -v kubectl >/dev/null 2>&1 && kubectl version --request-timeout=5s >/dev/null 2>&1; then
+  leaks=$(kubectl get endpointslice,svc,networkpolicy,configmap -A -o json 2>/dev/null | grep -cE '10\.20\.30\.(10|20)' || true)
+  cilium_leaks=0
+  if kubectl get crd ciliumnetworkpolicies.cilium.io >/dev/null 2>&1; then
+    cilium_leaks=$(kubectl get ciliumnetworkpolicy -A -o json 2>/dev/null | grep -cE '10\.20\.30\.(10|20)' || true)
+  fi
+  if [ "${leaks:-0}" -eq 0 ] && [ "${cilium_leaks:-0}" -eq 0 ]; then
+    ok "no 10.20.30.10/20 placeholder in live cluster state"
+  else
+    note "placeholder address LIVE in the cluster (${leaks:-0} core + ${cilium_leaks:-0} cilium occurrence(s)) — deploy/agent-sandbox/ was applied directly; re-run deploy.sh with OLLAMA_HOST and WEBUI_IP set"
+  fi
+else
+  echo "  skip (no reachable cluster — static checks above still ran)"
+fi
 
 echo
 [ "$fail" -eq 0 ] && { echo "PASS"; exit 0; } || { echo "FAILED"; exit 1; }

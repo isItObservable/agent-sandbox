@@ -220,6 +220,14 @@ RuntimeClass, the `agent-sandbox` controller, both collectors, and the demo
 OpenClaw Sandbox wired to your Ollama endpoint. Every step is `kubectl apply` +
 an explicit `kubectl wait`, so it is safe to re-run:
 
+> **Set `OLLAMA_HOST` and `WEBUI_IP` first — and deploy with `deploy.sh`, not a
+> bare `kubectl apply -f deploy/agent-sandbox/`.** The manifests ship
+> documentation placeholders (`10.20.30.10` = your model host, `10.20.30.20` =
+> the WebUI). `deploy.sh` rewrites them from these two variables and **refuses
+> to apply** if a placeholder survives. Applied directly, the agent boots
+> pointing at a model address that answers nowhere — and nothing in Kubernetes
+> tells you why.
+
 ```bash
 git clone https://github.com/isItObservable/agent-sandbox.git
 cd agent-sandbox
@@ -311,7 +319,7 @@ full-stack.
 | [`TUTORIAL.md`](./TUTORIAL.md) | Ordered, copy-paste walkthrough. **Start here.** |
 | [`OBSERVABILITY.md`](./OBSERVABILITY.md) | The grounded telemetry inventory — every signal, observed live. |
 | `deploy/deploy.sh` | One-shot installer for the whole stack. |
-| `deploy/verify-deploy.sh` | Installer sanity gate (no cluster required). |
+| `deploy/verify-deploy.sh` | Installer sanity gate — static checks everywhere, plus a live placeholder-leak scan when a cluster is reachable. |
 | `deploy/gvisor/` | `runsc` RuntimeClass + privileged node-installer DaemonSet. |
 | `deploy/dynatrace/` | ActiveGate-only DynaKube + token secret template. |
 | `deploy/agent-sandbox/` | The demo OpenClaw Sandbox + its config/secret template, plus a lifecycle driver (Template + WarmPool + Claims + a TTL sandbox). |

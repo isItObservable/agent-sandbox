@@ -1,5 +1,11 @@
 # The trap that silently kills a self-hosted model backend
 # ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships documentation
+# placeholders (10.20.30.10/32 for the model host, 10.20.30.0/24 for the LAN).
+# deploy/deploy.sh rewrites them from OLLAMA_HOST and WEBUI_IP; TUTORIAL.md
+# readers — edit them first. Applied as-is, the agent's egress to your model
+# is dropped and every prompt just times out.
+# ============================================================================
 # A `SandboxTemplate` makes the controller generate a NetworkPolicy for you.
 # Read what it actually says (`kubectl get netpol openclaw-tpl-network-policy -o yaml`):
 #
