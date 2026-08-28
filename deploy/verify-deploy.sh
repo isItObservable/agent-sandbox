@@ -149,7 +149,7 @@ echo "6. Every placeholder-bearing manifest warns against direct kubectl apply"
 # live — the agent then dials a model that answers nowhere. Each file carrying
 # a placeholder must say so in its header, because that header is the only
 # warning a manual apply ever shows.
-for f in ollama-endpoint.yaml demo-sandbox.yaml openclaw-ui-service.yaml openclaw-netpol.yaml openclaw-netpol-cilium.yaml; do
+for f in ollama-endpoint.yaml demo-sandbox.yaml openclaw-ui-service.yaml openclaw-netpol.yaml openclaw-netpol-cilium.yaml openclaw-pool.yaml; do
   grep -q 'DO NOT kubectl apply' "${HERE}/agent-sandbox/$f" \
     && ok "$f carries the direct-apply warning" \
     || note "$f carries a placeholder but no direct-apply warning header"
@@ -168,6 +168,17 @@ if command -v kubectl >/dev/null 2>&1 && kubectl version --request-timeout=5s >/
     ok "no 10.20.30.10/20 placeholder in live cluster state"
   else
     note "placeholder address LIVE in the cluster (${leaks:-0} core + ${cilium_leaks:-0} cilium occurrence(s)) — deploy/agent-sandbox/ was applied directly; re-run deploy.sh with OLLAMA_HOST and WEBUI_IP set"
+  fi
+  # openclaw-pool.yaml carries a different placeholder: the StorageClass name.
+  # An unsubstituted apply leaves SandboxTemplate/openclaw-tpl asking for the
+  # literal class __STORAGE_CLASS_NAME__ — the PVCs pend forever, silently.
+  if kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1; then
+    sc_leaks=$(kubectl get sandboxtemplate -A -o json 2>/dev/null | grep -c '__STORAGE_CLASS_NAME__' || true)
+    if [ "${sc_leaks:-0}" -eq 0 ]; then
+      ok "no __STORAGE_CLASS_NAME__ placeholder in live SandboxTemplates"
+    else
+      note "__STORAGE_CLASS_NAME__ LIVE in a SandboxTemplate — openclaw-pool.yaml was applied without the STORAGE_CLASS_NAME substitution (TUTORIAL.md Step 7)"
+    fi
   fi
 else
   echo "  skip (no reachable cluster — static checks above still ran)"
