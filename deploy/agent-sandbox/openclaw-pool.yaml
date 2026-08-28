@@ -12,6 +12,12 @@
 #
 # Requires the `openclaw-secrets` Secret and `openclaw-config` ConfigMap from
 # demo-sandbox.yaml, so apply that first.
+#
+# PERSISTENT STATE: the workspace volume is a TEMPLATE-level
+# `spec.volumeClaimTemplates` entry, so the controller provisions one PVC PER
+# pool member (StatefulSet-style) and warm-pool adoption still works. It needs
+# a StorageClass in the cluster — the demo cluster has `nfs-csi` (default).
+# See TUTORIAL.md §7 for the full trade-off.
 # ============================================================================
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
@@ -20,6 +26,22 @@ metadata:
   namespace: default
 spec:
   envVarsInjectionPolicy: Allowed
+  # Allowed = claims MAY declare their own volumeClaimTemplates (which bypasses
+  # the warm pool — the trap below). The template's own templates below are
+  # always honoured; this policy only gates claim-level overrides.
+  volumeClaimTemplatesPolicy: Allowed
+  # Provisioned PER pool member, StatefulSet-style — this is the warm-pool-safe
+  # way to give pooled agents persistent state. A per-CLAIM volume (like a
+  # per-claim `spec.env`) is what bypasses the pool and forces a cold start.
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: nfs-csi
+        resources:
+          requests:
+            storage: 2Gi
   podTemplate:
     metadata:
       # `app: openclaw` is the stable handle the egress policy selects on. Do
@@ -28,6 +50,11 @@ spec:
       labels:
         app: openclaw
     spec:
+      # fsGroup 1000 makes the provisioned PVC writable by the agent's uid — a
+      # freshly provisioned CSI volume is root-owned otherwise. Not needed for
+      # emptyDir, REQUIRED for volumeClaimTemplates with runAsNonRoot.
+      securityContext:
+        fsGroup: 1000
       # THE SECOND HALF OF THE MODEL-BACKEND TRAP. A template-derived sandbox is
       # born with `dnsPolicy: None` and `nameservers: [8.8.8.8, 1.1.1.1]` --
       # public resolvers only, cluster DNS not in the list. So EVERY in-cluster
@@ -46,8 +73,9 @@ spec:
           image: ghcr.io/openclaw/openclaw:2026.6.34@sha256:47d342bafe83bd3b2dca6f1d8d8b608ba7b542a1952564960648943346206759
           # The openclaw:slim image already runs as uid 1000 (node); we declare
           # it explicitly and drop every capability so pooled members are
-          # least-privilege on paper as well as in practice. No fsGroup is
-          # needed -- /workspace is an emptyDir writable by uid 1000.
+          # least-privilege on paper as well as in practice. The pod-level
+          # fsGroup (1000) above is what keeps the PVC-backed /workspace
+          # writable for this uid.
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -109,16 +137,10 @@ spec:
         - name: config
           configMap:
             name: openclaw-config
-        # emptyDir: this demo gives pooled agents ephemeral state. For state
-        # that survives a pod restart, the SandboxTemplate supports a top-level
-        # `spec.volumeClaimTemplates` (+ `volumeClaimTemplatesPolicy: Allowed`),
-        # which the controller provisions PER pool member -- StatefulSet-style,
-        # NOT a single shared PVC -- so it is fully warm-pool compatible. It
-        # needs a StorageClass/provisioner in the cluster; this one has none, so
-        # we stay on emptyDir. The warm-pool trap is per-CLAIM config
-        # (`spec.env` / claim-level volumes), not template-level volumes.
-        - name: workspace
-          emptyDir: {}
+        # There is NO `workspace` entry here on purpose: the volumeMount above
+        # resolves the name `workspace` against the template-level
+        # `spec.volumeClaimTemplates`, exactly like a StatefulSet. Defining a
+        # pod volume with the same name would shadow the claim.
         - name: tmp
           emptyDir: {}
 ---
