@@ -1,5 +1,9 @@
 # The narrow allow rule that quietly opened the whole model host
 # ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships a documentation
+# placeholder (10.20.30.10/32). deploy/deploy.sh rewrites it from OLLAMA_HOST;
+# TUTORIAL.md readers — edit it first.
+# ============================================================================
 # OPTIONAL on paper, NOT optional here. Apply this if your CNI is Cilium — which
 # it is on the cluster this episode is built on.
 #

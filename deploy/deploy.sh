@@ -56,6 +56,27 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
+# Placeholder-leak guard. The manifests under agent-sandbox/ ship documentation
+# addresses (10.20.30.10 = model host, 10.20.30.20 = WebUI, 10.20.30.0/24 = LAN)
+# that the substitutions below rewrite from OLLAMA_HOST / WEBUI_IP. A sed whose
+# pattern no longer matches is a SILENT no-op — the placeholder goes to the
+# cluster and the agent dials a model at an address that answers nowhere, with
+# no Kubernetes signal explaining why. Refuse to apply instead.
+apply_substituted() {
+  local file="$1"; shift
+  local out
+  out="$(sed "$@" "$file")"
+  # Comments quote the documentation addresses on purpose (the Cilium policy
+  # shows measured results verbatim) — only live config lines may not leak.
+  if grep -vE '^\s*#' <<<"$out" | grep -qE '10\.20\.30\.(10|20)|10\.20\.30\.0/24'; then
+    echo "ERROR: a documentation placeholder survived substitution in ${file}." >&2
+    echo "       The sed pattern no longer matches the manifest. Refusing to apply" >&2
+    echo "       a dead address — fix the manifest or the substitution." >&2
+    exit 1
+  fi
+  kubectl apply -f - <<<"$out"
+}
+
 # --- 1. OpenTelemetry Operator ---------------------------------------------
 say "OpenTelemetry Operator ${OTEL_OPERATOR_VERSION}"
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null
@@ -115,28 +136,28 @@ kubectl create secret generic openclaw-secrets -n default \
 # The model backend, BEFORE the sandbox — openclaw.json resolves
 # `ollama.default.svc.cluster.local` at boot. Same sed-substitution shape as the
 # DynaKube above: the address is the one environment-specific value here.
-sed "s#\"10.20.30.10\"#\"${OLLAMA_HOST}\"#" "${HERE}/agent-sandbox/ollama-endpoint.yaml" | kubectl apply -f -
+apply_substituted "${HERE}/agent-sandbox/ollama-endpoint.yaml" "s#\"10.20.30.10\"#\"${OLLAMA_HOST}\"#"
 
 # The WebUI address appears in TWO places that must agree -- the Service that
 # publishes it and the allowedOrigins list inside openclaw.json. Substituting
 # only one of them gives you a UI that loads and cannot log in.
-sed "s#10\.20\.30\.20#${WEBUI_IP}#g" "${HERE}/agent-sandbox/demo-sandbox.yaml" | kubectl apply -f -
-sed "s#10\.20\.30\.20#${WEBUI_IP}#g" "${HERE}/agent-sandbox/openclaw-ui-service.yaml" | kubectl apply -f -
+apply_substituted "${HERE}/agent-sandbox/demo-sandbox.yaml" "s#10\.20\.30\.20#${WEBUI_IP}#g"
+apply_substituted "${HERE}/agent-sandbox/openclaw-ui-service.yaml" "s#10\.20\.30\.20#${WEBUI_IP}#g"
 
 # Egress. The controller generates its own policy for template-derived
 # sandboxes and REVERTS edits to it, so the holes are unioned back from here.
 # Without this the agent cannot reach the model and the LoadBalancer's packets
 # are dropped — the browser just hangs. TUTORIAL.md Step 7b explains the trap.
-sed -e "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#" \
-    -e "s#10\.20\.30\.0/24#${LAN_CIDR}#" \
-    "${HERE}/agent-sandbox/openclaw-netpol.yaml" | kubectl apply -f -
+apply_substituted "${HERE}/agent-sandbox/openclaw-netpol.yaml" \
+  -e "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#" \
+  -e "s#10\.20\.30\.0/24#${LAN_CIDR}#"
 
 # ...and the confinement for that allow. A /32 + single-port allow does NOT
 # restrict the host to that port — it opens EVERY port on it, SSH included.
 # Cilium-only, so apply it only if the CRD is present; on another CNI you must
 # find your own equivalent before exposing a code-executing sandbox.
 if kubectl get crd ciliumnetworkpolicies.cilium.io >/dev/null 2>&1; then
-  sed "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#" "${HERE}/agent-sandbox/openclaw-netpol-cilium.yaml" | kubectl apply -f -
+  apply_substituted "${HERE}/agent-sandbox/openclaw-netpol-cilium.yaml" "s#10\.20\.30\.10/32#${OLLAMA_HOST}/32#"
 else
   echo "    !! CNI is not Cilium: the /32 egress allow leaves EVERY port on ${OLLAMA_HOST}"
   echo "       reachable from the sandbox (verify with 'nc -z ${OLLAMA_HOST} 22')."

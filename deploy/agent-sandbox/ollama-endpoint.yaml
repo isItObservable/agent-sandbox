@@ -1,5 +1,11 @@
 # Where the model actually lives — the ONE file you edit per environment
 # ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships a documentation
+# placeholder (10.20.30.10). deploy/deploy.sh rewrites it from OLLAMA_HOST and
+# REFUSES to apply if the placeholder survives; TUTORIAL.md readers — edit the
+# address below first. Applied as-is, the agent dials a model at an address
+# that answers nowhere, and nothing in Kubernetes tells you why.
+# ============================================================================
 # OpenClaw's config names `http://ollama.default.svc.cluster.local:11434`, not
 # an IP. That indirection exists for a specific reason: the model backend is the
 # only environment-specific value in this whole manifest set, and if it sat in
