@@ -1,3 +1,11 @@
+# The workspace volume — the ONE storage value you set per environment
+# ============================================================================
+# DO NOT kubectl apply this file unchanged: it ships a documentation
+# placeholder (`__STORAGE_CLASS_NAME__`). Substitute your cluster's
+# StorageClass first — TUTORIAL.md Step 7 shows the one-line sed; applied
+# as-is, the PVCs stay Pending forever and the pool never warms, with no
+# Kubernetes signal naming the cause.
+# ============================================================================
 # Warm-pooling a REAL agent image — the Step 7 / §9a demonstration
 # ============================================================================
 # The lifecycle driver uses a tiny image so the state space is quick to
@@ -16,8 +24,9 @@
 # PERSISTENT STATE: the workspace volume is a TEMPLATE-level
 # `spec.volumeClaimTemplates` entry, so the controller provisions one PVC PER
 # pool member (StatefulSet-style) and warm-pool adoption still works. It needs
-# a StorageClass in the cluster — the demo cluster has `nfs-csi` (default).
-# See TUTORIAL.md §7 for the full trade-off.
+# a StorageClass in the cluster — set via the STORAGE_CLASS_NAME env var at
+# apply time (the demo cluster uses `nfs-csi`). See TUTORIAL.md §7 for the
+# full trade-off.
 # ============================================================================
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
@@ -38,7 +47,8 @@ spec:
         name: workspace
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: nfs-csi
+        # Substituted at apply time from STORAGE_CLASS_NAME — see the header.
+        storageClassName: __STORAGE_CLASS_NAME__
         resources:
           requests:
             storage: 2Gi

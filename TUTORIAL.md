@@ -93,10 +93,9 @@ Any recent Kubernetes with a CNI is fine. This episode was built on a
 **StorageClass required for Step 7.** `demo-sandbox.yaml` uses `emptyDir`, but
 the warm pool (`openclaw-pool.yaml`) gives every pooled agent a persistent,
 per-member PVC via template-level `volumeClaimTemplates` — see the warm-pool/
-persistence trade-off in Step 7. The demo cluster uses the `nfs-csi`
-StorageClass; on another cluster, install any CSI provisioner (e.g.
-`nfs-csi`, `local-path`) and edit `storageClassName` in `openclaw-pool.yaml`
-to match.
+persistence trade-off in Step 7. The StorageClass is a parameter you set at
+apply time (`STORAGE_CLASS_NAME`, e.g. `nfs-csi` or `local-path`); the demo
+cluster uses `nfs-csi`.
 
 ---
 
@@ -417,7 +416,12 @@ Pooling OpenClaw works identically, with one rule that decides whether the pool
 functions at all:
 
 ```bash
-kubectl apply -f deploy/agent-sandbox/openclaw-pool.yaml
+# The pool's per-member PVCs need your cluster's StorageClass — the demo
+# cluster uses nfs-csi. kubectl apply -f on the raw file would apply the
+# __STORAGE_CLASS_NAME__ placeholder and the PVCs would pend forever.
+export STORAGE_CLASS_NAME=nfs-csi   # kubectl get storageclass to find yours
+sed "s#__STORAGE_CLASS_NAME__#${STORAGE_CLASS_NAME:?set STORAGE_CLASS_NAME to your cluster's StorageClass}#" \
+  deploy/agent-sandbox/openclaw-pool.yaml | kubectl apply -f -
 ```
 
 **Everything the agent needs to be born configured goes in the `SandboxTemplate`.**
@@ -449,8 +453,8 @@ entry to that claim and it cold-starts instead (§9a).
 > every pooled member (and RWO means they will not even schedule together),
 > while a per-claim `volumeClaimTemplates` bypasses the pool exactly like
 > `spec.env` does. Per-member PVCs need a StorageClass/provisioner in the
-> cluster — the demo cluster uses the `nfs-csi` StorageClass (provisioned by
-> the platform side of this setup; any CSI provisioner works).
+> cluster — any CSI provisioner works; you pass its name at apply time via
+> `STORAGE_CLASS_NAME` (the apply command above).
 
 ---
 

@@ -424,8 +424,9 @@ Pinned at `launch_type="cold"` means your pool is decorative. Full write-up in
   images — `demo-agent` reported Ready 14 s before OpenClaw could serve.
 - **Pooled state is possible, with a caveat.** Template-level
   `volumeClaimTemplates` is provisioned **per pool member** (StatefulSet-style)
-  and *is* warm-pool compatible — `openclaw-pool.yaml` demonstrates it (needs a
-  StorageClass/provisioner in the cluster; the demo cluster uses `nfs-csi`).
+  and *is* warm-pool compatible — `openclaw-pool.yaml` demonstrates it (the
+  StorageClass is user-supplied via `STORAGE_CLASS_NAME` at apply time; the
+  demo cluster uses `nfs-csi`).
   A **per-claim** volume, like a per-claim `spec.env`, bypasses the pool.
 - **Under gVisor, `/proc` is only as honest as your limits.** With a memory limit
   set, `MemTotal` is exactly the limit; without one it is the whole node — and
