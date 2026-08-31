@@ -274,34 +274,38 @@ what to look for in the telemetry.
 
 ## Reference architecture
 
-```
- ┌───────────────────────────────────────────────────────────────────────────┐
- │  namespace: default                                                        │
- │                                                                            │
- │   SandboxTemplate ──▶ SandboxWarmPool ──(pre-warms)──▶ Sandbox  Sandbox     │
- │                              ▲                            │        │       │
- │   SandboxClaim ──(adopts)────┘                            ▼        ▼       │
- │                                                     ┌──────────────────┐   │
- │                                                     │  OpenClaw agent  │   │
- │                                                     │  runtimeClass:   │   │
- │                                                     │     gvisor       │   │
- │                                                     │  4.19.0-gvisor   │   │
- │                                                     └────────┬─────────┘   │
- └──────────────────────────────────────────────────────────── │ ───────────┘
-        │ CR watch            │ :8080/metrics          │ kubelet │ stats + logs
-        │ (k8sobjects)        │ (prometheus)           │         ▼
-        ▼                     ▼                        │   self-hosted Ollama
-   ╔══════════════════════════════════╗   ╔════════════╧═════════════════════╗
-   ║ OTel Collector — GATEWAY         ║   ║ OTel Collector — NODE (DaemonSet) ║
-   ║ prometheus · k8s_cluster ·       ║   ║ kubeletstats · filelog            ║
-   ║ k8sobjects · otlp :4317/:4318 ◀──╫───╫── in-sandbox agents (SDK)         ║
-   ╚═════════════╤════════════════════╝   ╚══════════════════════════════════╝
-                 │  OTLP/HTTP
-                 ▼
-        ┌────────────────────────────────────────────────────┐
-        │        Dynatrace  ◀── ActiveGate (DynaKube)         │
-        │                       cluster/K8s metrics           │
-        └────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph ns["namespace: default"]
+    ST[SandboxTemplate]
+    WP[SandboxWarmPool]
+    SC[SandboxClaim]
+    SB1[Sandbox]
+    SB2[Sandbox]
+    AGENT["OpenClaw agent<br/>runtimeClass: gvisor<br/>4.19.0-gvisor"]
+    ST --> WP
+    WP -- pre-warms --> SB1
+    WP -- pre-warms --> SB2
+    SC -- adopts --> WP
+    SB1 --> AGENT
+    SB2 --> AGENT
+  end
+
+  OLLAMA["self-hosted Ollama<br/>(off-cluster LLM)"]
+  SDK["in-sandbox agents (SDK)"]
+  GW["OTel Collector — GATEWAY<br/>prometheus · k8s_cluster ·<br/>k8sobjects · otlp :4317/:4318"]
+  NODE["OTel Collector — NODE (DaemonSet)<br/>kubeletstats · filelog"]
+  DT[Dynatrace]
+  AGATE["ActiveGate (DynaKube)<br/>cluster / K8s metrics"]
+
+  ns -- "CR watch (k8sobjects)" --> GW
+  ns -- ":8080/metrics (prometheus)" --> GW
+  ns -- "kubelet stats + logs<br/>(kubeletstats + filelog)" --> NODE
+  AGENT -- "LAN (NetworkPolicy allow)" --> OLLAMA
+  SDK -- "OTLP :4317/:4318" --> GW
+  GW -- "OTLP/HTTP" --> DT
+  NODE -- "OTLP/HTTP" --> DT
+  AGATE -- "cluster / K8s metrics" --> DT
 ```
 
 Two egress paths, both auditable: the **Collectors** carry sandbox, controller
