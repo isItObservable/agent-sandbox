@@ -17,8 +17,22 @@ Collector pair that harvests every signal the stack really emits, and a single
 observability backend.
 
 [![Watch the episode](https://img.shields.io/badge/YouTube-IsItObservable-red?logo=youtube)](https://www.youtube.com/@Isitobservable)
+[![agent-sandbox](https://img.shields.io/badge/agent--sandbox-v0.5.2-326CE5?logo=kubernetes)](https://github.com/kubernetes-sigs/agent-sandbox)
+[![gVisor](https://img.shields.io/badge/runtime-gVisor%20runsc-00acc1)](https://gvisor.dev)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Operator-f5a800?logo=opentelemetry)](https://opentelemetry.io)
+[![Dynatrace](https://img.shields.io/badge/Backend-Dynatrace-1496ff?logo=dynatrace)](https://www.dynatrace.com)
 
 ---
+
+**Components used in this episode:**
+
+- **agent-sandbox** controller **v0.5.2** - `Sandbox` + Template / WarmPool / Claim extensions
+- **gVisor** (`runsc`) - the userspace-kernel isolation runtime
+- **OpenClaw** - the demo AI agent (and its Control UI), sandboxed and observable
+- Self-hosted **Ollama** - the model backend, external to the cluster
+- **OpenTelemetry Operator** + a gateway / node collector pair
+- **Dynatrace Operator** in `kubernetes-monitoring` mode (ActiveGate only)
+- **Cilium** + **MetalLB** - the CNI and the WebUI LoadBalancer
 
 ## What you will learn
 
@@ -64,21 +78,36 @@ observability backend.
 
 > A publication `grep`-gate fails the build on a stray real IP, a `dt0c01.` token
 > or a `github_pat_`. Everything in this repo uses documentation placeholders
-> (`10.20.30.x`); substitute your own values via the environment variables below.
+> (`10.20.30.x`); substitute your own values in `deploy/.env` — see [Getting started](#getting-started).
 
 ---
 
 ## Getting started
 
+All environment-specific values live in **one** git-ignored file - the same
+flow as every Is It Observable episode. Copy the template, fill it in, and
+hydrate it into your shell before applying anything:
+
+```bash
+git clone https://github.com/isItObservable/agent-sandbox.git
+cd agent-sandbox
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env            # DT_API_URL, DT_OPERATOR_TOKEN, DT_INGEST_TOKEN, OLLAMA_HOST, WEBUI_IP, ...
+set -a && . deploy/.env && set +a
+```
+
+`deploy/.env` is git-ignored - never commit real endpoints, tenants or tokens.
+`deploy/deploy.sh` loads it automatically; the sections below explain each value.
+
 ### 1. Dynatrace Tenant — start a trial
 
 If you don't already have one, create a free trial tenant at
 [https://www.dynatrace.com/trial](https://www.dynatrace.com/trial). Save your
-tenant API base URL (**including the `/api` suffix**):
+tenant API base URL (**including the `/api` suffix**) into `deploy/.env`:
 
 ```bash
 # e.g. https://abc12345.live.dynatrace.com/api
-export DT_API_URL=https://YOUR_TENANT.live.dynatrace.com/api
+DT_API_URL=https://YOUR_TENANT.live.dynatrace.com/api
 ```
 
 ### 2. Create the Dynatrace API Tokens
@@ -105,11 +134,11 @@ export OTLP to Dynatrace. Scopes:
 - `Ingest OpenTelemetry traces` (`openTelemetryTrace.ingest`)
 - `Ingest events` (`events.ingest`)
 
-Export both — the installer reads them from the environment:
+Put both in `deploy/.env` — the installer reads them from there:
 
 ```bash
-export DT_OPERATOR_TOKEN=dt0c01.XXXX     # DynaKube / ActiveGate — cluster monitoring
-export DT_INGEST_TOKEN=dt0c01.YYYY       # OTLP ingest — used by the collector
+DT_OPERATOR_TOKEN=dt0c01.XXXX     # DynaKube / ActiveGate — cluster monitoring
+DT_INGEST_TOKEN=dt0c01.YYYY       # OTLP ingest — used by the collector
 ```
 
 > No Dynatrace? The whole pipeline is backend-agnostic. Point the collectors'
@@ -220,7 +249,7 @@ RuntimeClass, the `agent-sandbox` controller, both collectors, and the demo
 OpenClaw Sandbox wired to your Ollama endpoint. Every step is `kubectl apply` +
 an explicit `kubectl wait`, so it is safe to re-run:
 
-> **Set `OLLAMA_HOST` and `WEBUI_IP` first — and deploy with `deploy.sh`, not a
+> **Fill in `deploy/.env` first — at minimum `OLLAMA_HOST` and `WEBUI_IP` — and deploy with `deploy.sh`, not a
 > bare `kubectl apply -f deploy/agent-sandbox/`.** The manifests ship
 > documentation placeholders (`10.20.30.10` = your model host, `10.20.30.20` =
 > the WebUI). `deploy.sh` rewrites them from these two variables and **refuses
@@ -233,11 +262,9 @@ git clone https://github.com/isItObservable/agent-sandbox.git
 cd agent-sandbox
 
 export KUBECONFIG="$PWD/agent-sandbox-demo.kubeconfig"
-export DT_API_URL=https://YOUR_TENANT.live.dynatrace.com/api
-export DT_OPERATOR_TOKEN=dt0c01.XXXX
-export DT_INGEST_TOKEN=dt0c01.YYYY
-export OLLAMA_HOST=10.20.30.40        # LAN IP of the host running `ollama serve`
-export WEBUI_IP=10.20.30.241          # an address from your MetalLB pool for the WebUI
+cp deploy/.env.example deploy/.env     # one git-ignored file for every environment value
+$EDITOR deploy/.env                    # DT_API_URL, DT_* tokens, OLLAMA_HOST, WEBUI_IP
+set -a && . deploy/.env && set +a
 
 ./deploy/deploy.sh
 ```

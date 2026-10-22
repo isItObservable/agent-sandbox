@@ -18,6 +18,17 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# deploy/.env - the one environment-specific file (copy deploy/.env.example).
+# Loaded before the guards so the guards double as the did-you-fill-it-in
+# check. Values defined in the file override the calling environment.
+ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"
+if [ -f "${ENV_FILE}" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
+
 : "${DT_API_URL:?set DT_API_URL, e.g. https://<your-tenant>.live.dynatrace.com/api}"
 : "${DT_OPERATOR_TOKEN:?set DT_OPERATOR_TOKEN (Dynatrace API token)}"
 : "${DT_INGEST_TOKEN:?set DT_INGEST_TOKEN (data-ingest token)}"

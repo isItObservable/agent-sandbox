@@ -66,9 +66,9 @@ kernel bug away from the rest of your cluster. So we set
 
 ```bash
 export KUBECONFIG=~/.kube/agent-sandbox-demo.kubeconfig
-export DT_API_URL=https://<your-tenant>.live.dynatrace.com/api
-export DT_OPERATOR_TOKEN=dt0c01....
-export DT_INGEST_TOKEN=dt0c01....
+cp deploy/.env.example deploy/.env     # one git-ignored file, loaded by deploy.sh
+$EDITOR deploy/.env                    # DT_API_URL, DT_OPERATOR_TOKEN, DT_INGEST_TOKEN, ...
+set -a && . deploy/.env && set +a
 ```
 
 ---
